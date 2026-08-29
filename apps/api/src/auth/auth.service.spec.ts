@@ -142,4 +142,123 @@ describe('AuthService - Session and Access Token', () => {
 
     expect(lifetimeSeconds).toBe(15 * 60);
   });
+
+  it('rotates the refresh token and creates a new session', async () => {
+    const oldSession = await authService.createSession(
+      userId,
+      'rotation-test-device',
+    );
+
+    const rotationResult = await authService.rotateRefreshToken(
+      oldSession.sessionId,
+      oldSession.refreshToken,
+    );
+
+    expect(rotationResult.sessionId).toBeTruthy();
+    expect(rotationResult.sessionId).not.toBe(
+      oldSession.sessionId,
+    );
+
+    expect(rotationResult.refreshToken).toBeTruthy();
+    expect(rotationResult.refreshToken).not.toBe(
+      oldSession.refreshToken,
+    );
+
+    expect(rotationResult.accessToken).toBeTruthy();
+
+    const oldSessionFromDatabase =
+      await prisma.session.findUnique({
+        where: {
+          id: oldSession.sessionId,
+        },
+      });
+
+    expect(oldSessionFromDatabase).not.toBeNull();
+    expect(oldSessionFromDatabase?.revokedAt).not.toBeNull();
+
+    const newSessionFromDatabase =
+      await prisma.session.findUnique({
+        where: {
+          id: rotationResult.sessionId,
+        },
+      });
+
+    expect(newSessionFromDatabase).not.toBeNull();
+
+    expect(newSessionFromDatabase?.userId).toBe(userId);
+
+    expect(newSessionFromDatabase?.deviceId).toBe(
+      'rotation-test-device',
+    );
+
+    expect(newSessionFromDatabase?.revokedAt).toBeNull();
+
+    const expectedNewHash = createHash('sha256')
+      .update(rotationResult.refreshToken)
+      .digest('hex');
+
+    expect(newSessionFromDatabase?.refreshTokenHash).toBe(
+      expectedNewHash,
+    );
+
+    expect(newSessionFromDatabase?.refreshTokenHash).not.toBe(
+      rotationResult.refreshToken,
+    );
+  });
+
+  it('rejects the old refresh token after rotation', async () => {
+    const oldSession = await authService.createSession(userId);
+
+    const rotationResult =
+      await authService.rotateRefreshToken(
+        oldSession.sessionId,
+        oldSession.refreshToken,
+      );
+
+    await expect(
+      authService.validateRefreshToken(
+        oldSession.sessionId,
+        oldSession.refreshToken,
+      ),
+    ).rejects.toThrow('Invalid session');
+
+    const newSession =
+      await authService.validateRefreshToken(
+        rotationResult.sessionId,
+        rotationResult.refreshToken,
+      );
+
+    expect(newSession.id).toBe(
+      rotationResult.sessionId,
+    );
+
+    expect(newSession.userId).toBe(userId);
+  });
+
+  it('creates an access token for the new session after rotation', async () => {
+    const oldSession = await authService.createSession(userId);
+
+    const rotationResult =
+      await authService.rotateRefreshToken(
+        oldSession.sessionId,
+        oldSession.refreshToken,
+      );
+
+    const payload = await jwtService.verifyAsync(
+      rotationResult.accessToken,
+    );
+
+    expect(payload.sub).toBe(userId);
+
+    expect(payload.sid).toBe(
+      rotationResult.sessionId,
+    );
+
+    expect(payload.exp).toBeTypeOf('number');
+    expect(payload.iat).toBeTypeOf('number');
+
+    expect(payload.exp - payload.iat).toBe(
+      15 * 60,
+    );
+  });
 });

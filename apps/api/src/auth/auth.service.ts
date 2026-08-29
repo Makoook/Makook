@@ -85,6 +85,62 @@ export class AuthService {
     return session;
   }
 
+  async rotateRefreshToken(
+    sessionId: string,
+    refreshToken: string,
+  ): Promise<{
+    sessionId: string;
+    refreshToken: string;
+    accessToken: string;
+  }> {
+    const session = await this.validateRefreshToken(
+      sessionId,
+      refreshToken,
+    );
+
+    const newRefreshToken = this.generateRefreshToken();
+
+    const newRefreshTokenHash =
+      this.hashRefreshToken(newRefreshToken);
+
+    const newExpiresAt = new Date();
+
+    newExpiresAt.setDate(newExpiresAt.getDate() + 30);
+
+    const result = await this.prisma.$transaction(async (tx) => {
+      await tx.session.update({
+        where: {
+          id: session.id,
+        },
+        data: {
+          revokedAt: new Date(),
+        },
+      });
+
+      const newSession = await tx.session.create({
+        data: {
+          userId: session.userId,
+          refreshTokenHash: newRefreshTokenHash,
+          deviceId: session.deviceId,
+          expiresAt: newExpiresAt,
+        },
+      });
+
+      return newSession;
+    });
+
+    const accessToken = await this.createAccessToken(
+      session.userId,
+      result.id,
+    );
+
+    return {
+      sessionId: result.id,
+      refreshToken: newRefreshToken,
+      accessToken,
+    };
+  }
+
   async revokeSession(sessionId: string): Promise<void> {
     await this.prisma.session.updateMany({
       where: {
