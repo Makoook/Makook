@@ -145,3 +145,11 @@ Thumbs.db
 # IDE
 .vscode/
 .idea/
+
+# TypeScript build info
+*.tsbuildinfo
+
+
+# Nested package manager files
+apps/*/pnpm-lock.yaml
+apps/*/pnpm-workspace.yaml
