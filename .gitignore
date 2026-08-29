@@ -153,3 +153,17 @@ Thumbs.db
 # Nested package manager files
 apps/*/pnpm-lock.yaml
 apps/*/pnpm-workspace.yaml
+
+# Docker local environment
+infrastructure/docker/.env
+
+/generated/prisma
+
+# Local AI / Prisma generated tooling
+.agents/
+.claude/
+.windsurf/
+skills-lock.json
+
+# Prisma generated client
+apps/api/src/generated/
