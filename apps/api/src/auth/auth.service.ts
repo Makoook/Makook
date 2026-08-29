@@ -1,10 +1,14 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
 import { createHash, randomBytes } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service.js';
 
 @Injectable()
 export class AuthService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly jwtService: JwtService,
+  ) {}
 
   private generateRefreshToken(): string {
     return randomBytes(48).toString('base64url');
@@ -17,11 +21,16 @@ export class AuthService {
   async createSession(
     userId: string,
     deviceId?: string,
-  ): Promise<{ sessionId: string; refreshToken: string }> {
+  ): Promise<{
+    sessionId: string;
+    refreshToken: string;
+  }> {
     const refreshToken = this.generateRefreshToken();
+
     const refreshTokenHash = this.hashRefreshToken(refreshToken);
 
     const expiresAt = new Date();
+
     expiresAt.setDate(expiresAt.getDate() + 30);
 
     const session = await this.prisma.session.create({
@@ -39,12 +48,24 @@ export class AuthService {
     };
   }
 
+  async createAccessToken(
+    userId: string,
+    sessionId: string,
+  ): Promise<string> {
+    return this.jwtService.signAsync({
+      sub: userId,
+      sid: sessionId,
+    });
+  }
+
   async validateRefreshToken(
     sessionId: string,
     refreshToken: string,
   ) {
     const session = await this.prisma.session.findUnique({
-      where: { id: sessionId },
+      where: {
+        id: sessionId,
+      },
     });
 
     if (
@@ -55,9 +76,9 @@ export class AuthService {
       throw new UnauthorizedException('Invalid session');
     }
 
-    const hash = this.hashRefreshToken(refreshToken);
+    const refreshTokenHash = this.hashRefreshToken(refreshToken);
 
-    if (hash !== session.refreshTokenHash) {
+    if (refreshTokenHash !== session.refreshTokenHash) {
       throw new UnauthorizedException('Invalid refresh token');
     }
 
