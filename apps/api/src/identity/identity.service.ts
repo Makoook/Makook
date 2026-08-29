@@ -1,13 +1,14 @@
 import { ConflictException, Injectable } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { CreateUserDto } from './dto/create-user.dto.js';
+import { UserResponseDto } from './dto/user-response.dto.js';
 
 @Injectable()
 export class IdentityService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async findUserById(id: string) {
-    return this.prisma.user.findUnique({
+  async findUserById(id: string): Promise<UserResponseDto | null> {
+    const user = await this.prisma.user.findUnique({
       where: { id },
       include: {
         roles: {
@@ -17,9 +18,30 @@ export class IdentityService {
         },
       },
     });
+
+    if (!user) {
+      return null;
+    }
+
+    return {
+      id: user.id,
+      phone: user.phone,
+      email: user.email,
+      phoneVerifiedAt: user.phoneVerifiedAt,
+      emailVerifiedAt: user.emailVerifiedAt,
+      status: user.status,
+      createdAt: user.createdAt,
+      updatedAt: user.updatedAt,
+      deletedAt: user.deletedAt,
+      roles: user.roles.map(({ role }) => ({
+        id: role.id,
+        name: role.name,
+        description: role.description,
+      })),
+    };
   }
 
-  async createUser(dto: CreateUserDto) {
+  async createUser(dto: CreateUserDto): Promise<UserResponseDto> {
     const phone = dto.phone;
     const email = dto.email;
 
@@ -47,11 +69,35 @@ export class IdentityService {
       }
     }
 
-    return this.prisma.user.create({
+    const user = await this.prisma.user.create({
       data: {
         phone,
         email,
       },
+      include: {
+        roles: {
+          include: {
+            role: true,
+          },
+        },
+      },
     });
+
+    return {
+      id: user.id,
+      phone: user.phone,
+      email: user.email,
+      phoneVerifiedAt: user.phoneVerifiedAt,
+      emailVerifiedAt: user.emailVerifiedAt,
+      status: user.status,
+      createdAt: user.createdAt,
+      updatedAt: user.updatedAt,
+      deletedAt: user.deletedAt,
+      roles: user.roles.map(({ role }) => ({
+        id: role.id,
+        name: role.name,
+        description: role.description,
+      })),
+    };
   }
 }
