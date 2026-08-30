@@ -1,13 +1,21 @@
 import { Injectable, UnauthorizedException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
-import { createHash, randomBytes } from 'node:crypto';
+import {
+  createHash,
+  randomBytes,
+  timingSafeEqual,
+} from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { Prisma } from '../generated/prisma/client.js';
+import { VerificationCodeType } from '../generated/prisma/enums.js';
+import { OtpService } from './otp/otp.service.js';
 
 @Injectable()
 export class AuthService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly jwtService: JwtService,
+    private readonly otpService: OtpService,
   ) {}
 
   private generateRefreshToken(): string {
@@ -18,6 +26,16 @@ export class AuthService {
     return createHash('sha256').update(token).digest('hex');
   }
 
+  private hashesMatch(left: string, right: string): boolean {
+    const leftBuffer = Buffer.from(left, 'hex');
+    const rightBuffer = Buffer.from(right, 'hex');
+
+    return (
+      leftBuffer.length === rightBuffer.length &&
+      timingSafeEqual(leftBuffer, rightBuffer)
+    );
+  }
+
   async createSession(
     userId: string,
     deviceId?: string,
@@ -25,27 +43,11 @@ export class AuthService {
     sessionId: string;
     refreshToken: string;
   }> {
-    const refreshToken = this.generateRefreshToken();
-
-    const refreshTokenHash = this.hashRefreshToken(refreshToken);
-
-    const expiresAt = new Date();
-
-    expiresAt.setDate(expiresAt.getDate() + 30);
-
-    const session = await this.prisma.session.create({
-      data: {
-        userId,
-        refreshTokenHash,
-        deviceId,
-        expiresAt,
-      },
-    });
-
-    return {
-      sessionId: session.id,
-      refreshToken,
-    };
+    return this.createSessionWithClient(
+      this.prisma,
+      userId,
+      deviceId,
+    );
   }
 
   async createAccessToken(
@@ -56,6 +58,47 @@ export class AuthService {
       sub: userId,
       sid: sessionId,
     });
+  }
+
+  async authenticateWithOtp(
+    type: VerificationCodeType,
+    identifier: string,
+    code: string,
+    deviceId?: string,
+  ): Promise<{
+    sessionId: string;
+    refreshToken: string;
+    accessToken: string;
+  }> {
+    const user = await this.otpService.findUserByIdentifier(
+      type,
+      identifier,
+    );
+
+    if (!user) {
+      throw new UnauthorizedException(
+        'Invalid or expired verification code',
+      );
+    }
+
+    const session = await this.otpService.verifyCode(
+      user.id,
+      type,
+      code,
+      (tx, userId) =>
+        this.createSessionWithClient(tx, userId, deviceId),
+    );
+
+    const accessToken = await this.createAccessToken(
+      user.id,
+      session.sessionId,
+    );
+
+    return {
+      sessionId: session.sessionId,
+      refreshToken: session.refreshToken,
+      accessToken,
+    };
   }
 
   async validateRefreshToken(
@@ -78,7 +121,7 @@ export class AuthService {
 
     const refreshTokenHash = this.hashRefreshToken(refreshToken);
 
-    if (refreshTokenHash !== session.refreshTokenHash) {
+    if (!this.hashesMatch(refreshTokenHash, session.refreshTokenHash)) {
       throw new UnauthorizedException('Invalid refresh token');
     }
 
@@ -151,5 +194,34 @@ export class AuthService {
         revokedAt: new Date(),
       },
     });
+  }
+
+  private async createSessionWithClient(
+    client: Prisma.TransactionClient | PrismaService,
+    userId: string,
+    deviceId?: string,
+  ): Promise<{
+    sessionId: string;
+    refreshToken: string;
+  }> {
+    const refreshToken = this.generateRefreshToken();
+    const refreshTokenHash = this.hashRefreshToken(refreshToken);
+    const expiresAt = new Date();
+
+    expiresAt.setDate(expiresAt.getDate() + 30);
+
+    const session = await client.session.create({
+      data: {
+        userId,
+        refreshTokenHash,
+        deviceId,
+        expiresAt,
+      },
+    });
+
+    return {
+      sessionId: session.id,
+      refreshToken,
+    };
   }
 }

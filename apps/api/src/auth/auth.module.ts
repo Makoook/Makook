@@ -7,6 +7,7 @@ import {
 import { AuthController } from './auth.controller.js';
 import { AuthService } from './auth.service.js';
 import { OtpModule } from './otp/otp.module.js';
+import { OtpController } from './otp/otp.controller.js';
 import { PrismaModule } from '../prisma/prisma.module.js';
 
 @Module({
@@ -31,6 +32,7 @@ import { PrismaModule } from '../prisma/prisma.module.js';
   ],
   controllers: [
     AuthController,
+    OtpController,
   ],
   providers: [
     AuthService,

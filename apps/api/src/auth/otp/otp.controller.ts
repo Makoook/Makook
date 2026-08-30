@@ -1,39 +1,39 @@
 import {
   Body,
   Controller,
+  HttpCode,
+  HttpStatus,
   Post,
 } from '@nestjs/common';
 import { VerificationCodeType } from '../../generated/prisma/enums.js';
+import { AuthService } from '../auth.service.js';
 import { OtpService } from './otp.service.js';
 import { RequestOtpDto } from './request-otp.dto.js';
 import { VerifyOtpDto } from './verify-otp.dto.js';
+import { normalizeIdentifier } from '../../identity/identifier-normalizer.js';
 
 @Controller('auth/otp')
 export class OtpController {
   constructor(
     private readonly otpService: OtpService,
+    private readonly authService: AuthService,
   ) {}
 
   @Post('request')
+  @HttpCode(HttpStatus.ACCEPTED)
   async requestOtp(
     @Body() dto: RequestOtpDto,
   ): Promise<{
     message: string;
   }> {
-    const identifier =
-      this.normalizeIdentifier(
-        dto.type,
-        dto.identifier,
-      );
-
     await this.otpService.requestOtp(
       dto.type,
-      identifier,
+      normalizeIdentifier(dto.type, dto.identifier),
     );
 
     return {
       message:
-        'If the account exists, a verification code has been sent',
+        'If the identifier can be used, a verification code has been sent',
     };
   }
 
@@ -41,53 +41,15 @@ export class OtpController {
   async verifyOtp(
     @Body() dto: VerifyOtpDto,
   ): Promise<{
-    message: string;
+    sessionId: string;
+    refreshToken: string;
+    accessToken: string;
   }> {
-    const identifier =
-      this.normalizeIdentifier(
-        dto.type,
-        dto.identifier,
-      );
-
-    const user =
-      await this.otpService.findUserByIdentifier(
-        dto.type,
-        identifier,
-      );
-
-    if (!user) {
-      return {
-        message:
-          'Verification code accepted',
-      };
-    }
-
-    await this.otpService.verifyCode(
-      user.id,
+    return this.authService.authenticateWithOtp(
       dto.type,
+      normalizeIdentifier(dto.type, dto.identifier),
       dto.code,
+      dto.deviceId,
     );
-
-    return {
-      message:
-        'Verification code accepted',
-    };
-  }
-
-  private normalizeIdentifier(
-    type: VerificationCodeType,
-    identifier: string,
-  ): string {
-    const normalizedIdentifier =
-      identifier.trim();
-
-    if (
-      type ===
-      VerificationCodeType.EMAIL
-    ) {
-      return normalizedIdentifier.toLowerCase();
-    }
-
-    return normalizedIdentifier;
   }
 }

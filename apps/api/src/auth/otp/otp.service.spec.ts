@@ -12,12 +12,15 @@ import {
 import { VerificationCodeType } from '../../generated/prisma/enums.js';
 import { OtpService } from './otp.service.js';
 import { PrismaService } from '../../prisma/prisma.service.js';
+import { IdentityService } from '../../identity/identity.service.js';
 
 describe('OtpService', () => {
   let prisma: PrismaService;
   let otpService: OtpService;
   let deliveryService: OtpDeliveryService;
   let userId: string;
+  let userEmail: string;
+  let userPhone: string;
 
   beforeAll(async () => {
     prisma = new PrismaService();
@@ -33,12 +36,12 @@ describe('OtpService', () => {
     deliveryService,
   );
 
+    userEmail = `otp-test-${Date.now()}@makook.local`;
+    userPhone = `+2010${Date.now().toString().slice(-8)}`;
     const user = await prisma.user.create({
       data: {
-        email: `otp-test-${Date.now()}@makook.local`,
-        phone: `+2010${Date.now()
-          .toString()
-          .slice(-8)}`,
+        email: userEmail,
+        phone: userPhone,
       },
     });
 
@@ -170,7 +173,7 @@ describe('OtpService', () => {
         firstCode,
       ),
     ).rejects.toThrow(
-      'Invalid verification code',
+      'Invalid or expired verification code',
     );
   });
 
@@ -262,7 +265,7 @@ describe('OtpService', () => {
         '000000',
       ),
     ).rejects.toThrow(
-      'Invalid verification code',
+      'Invalid or expired verification code',
     );
 
     const updatedRecord =
@@ -289,7 +292,7 @@ describe('OtpService', () => {
           '000000',
         ),
       ).rejects.toThrow(
-        'Invalid verification code',
+        'Invalid or expired verification code',
       );
     }
 
@@ -298,7 +301,6 @@ describe('OtpService', () => {
         where: {
           userId,
           type: VerificationCodeType.EMAIL,
-          usedAt: null,
         },
         orderBy: {
           createdAt: 'desc',
@@ -306,6 +308,7 @@ describe('OtpService', () => {
       });
 
     expect(record?.attempts).toBe(5);
+    expect(record?.usedAt).not.toBeNull();
 
     await expect(
       otpService.verifyCode(
@@ -314,7 +317,7 @@ describe('OtpService', () => {
         code,
       ),
     ).rejects.toThrow(
-      'Too many verification attempts',
+      'Invalid or expired verification code',
     );
   });
 
@@ -337,7 +340,61 @@ describe('OtpService', () => {
         code,
       ),
     ).rejects.toThrow(
-      'Invalid verification code',
+      'Invalid or expired verification code',
     );
+  });
+
+  it('leaves only one active OTP after concurrent requests', async () => {
+    await Promise.all(
+      Array.from({ length: 10 }, () =>
+        otpService.requestOtp(
+          VerificationCodeType.EMAIL,
+          `  ${userEmail.toUpperCase()}  `,
+        ),
+      ),
+    );
+
+    const activeCodes = await prisma.verificationCode.count({
+      where: {
+        userId,
+        type: VerificationCodeType.EMAIL,
+        usedAt: null,
+      },
+    });
+
+    expect(activeCodes).toBe(1);
+  });
+
+  it('enforces the shared E.164 phone policy at the service boundary', async () => {
+    await expect(
+      otpService.requestOtp(
+        VerificationCodeType.PHONE,
+        '  01000000000  ',
+      ),
+    ).rejects.toThrow('identifier must be a valid email or international phone number');
+
+    await expect(
+      otpService.findUserByIdentifier(
+        VerificationCodeType.PHONE,
+        '01000000000',
+      ),
+    ).rejects.toThrow('identifier must be a valid email or international phone number');
+
+    await expect(
+      new IdentityService(prisma).createUser({
+        phone: '01000000000',
+      }),
+    ).rejects.toThrow('phone and email must be valid normalized identifiers');
+
+    await otpService.requestOtp(
+      VerificationCodeType.PHONE,
+      `  ${userPhone}  `,
+    );
+
+    const normalizedUser = await otpService.findUserByIdentifier(
+      VerificationCodeType.PHONE,
+      userPhone,
+    );
+    expect(normalizedUser?.id).toBe(userId);
   });
 });

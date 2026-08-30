@@ -2,300 +2,205 @@ import {
   BadRequestException,
   UnauthorizedException,
 } from '@nestjs/common';
-import {
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { VerificationCodeType } from '../../generated/prisma/enums.js';
+import { AuthService } from '../auth.service.js';
 import { OtpController } from './otp.controller.js';
 import { OtpService } from './otp.service.js';
 
 describe('OtpController', () => {
   let controller: OtpController;
+
   let otpService: {
     requestOtp: ReturnType<typeof vi.fn>;
-    findUserByIdentifier: ReturnType<typeof vi.fn>;
-    verifyCode: ReturnType<typeof vi.fn>;
+  };
+
+  let authService: {
+    authenticateWithOtp: ReturnType<typeof vi.fn>;
   };
 
   beforeEach(() => {
     otpService = {
       requestOtp: vi.fn(),
-      findUserByIdentifier: vi.fn(),
-      verifyCode: vi.fn(),
+    };
+
+    authService = {
+      authenticateWithOtp: vi.fn(),
     };
 
     controller = new OtpController(
       otpService as unknown as OtpService,
+      authService as unknown as AuthService,
     );
   });
 
-  it('requests an email OTP with a normalized email address', async () => {
-    otpService.requestOtp.mockResolvedValue(
-      undefined,
-    );
-
-    const result =
+  describe('requestOtp', () => {
+    it('normalizes an email before requesting an OTP', async () => {
       await controller.requestOtp({
         type: VerificationCodeType.EMAIL,
-        identifier:
-          '  TEST@MAKOOK.LOCAL  ',
+        identifier: '  TEST@MAKOOK.LOCAL  ',
       });
 
-    expect(
-      otpService.requestOtp,
-    ).toHaveBeenCalledWith(
-      VerificationCodeType.EMAIL,
-      'test@makook.local',
-    );
-
-    expect(result).toEqual({
-      message:
-        'If the account exists, a verification code has been sent',
+      expect(otpService.requestOtp).toHaveBeenCalledTimes(1);
+      expect(otpService.requestOtp).toHaveBeenCalledWith(
+        VerificationCodeType.EMAIL,
+        'test@makook.local',
+      );
     });
-  });
 
-  it('requests a phone OTP with trimmed phone number', async () => {
-    otpService.requestOtp.mockResolvedValue(
-      undefined,
-    );
-
-    const result =
+    it('normalizes a phone before requesting an OTP', async () => {
       await controller.requestOtp({
         type: VerificationCodeType.PHONE,
-        identifier:
-          '  +201000000000  ',
+        identifier: '  +201000000000  ',
       });
 
-    expect(
-      otpService.requestOtp,
-    ).toHaveBeenCalledWith(
-      VerificationCodeType.PHONE,
-      '+201000000000',
-    );
-
-    expect(result).toEqual({
-      message:
-        'If the account exists, a verification code has been sent',
+      expect(otpService.requestOtp).toHaveBeenCalledTimes(1);
+      expect(otpService.requestOtp).toHaveBeenCalledWith(
+        VerificationCodeType.PHONE,
+        '+201000000000',
+      );
     });
-  });
 
-  it('does not reveal whether an email account exists', async () => {
-    otpService.requestOtp.mockResolvedValue(
-      undefined,
-    );
+    it('returns the generic response for an email request', async () => {
+      await expect(
+        controller.requestOtp({
+          type: VerificationCodeType.EMAIL,
+          identifier: 'person@makook.local',
+        }),
+      ).resolves.toEqual({
+        message:
+          'If the identifier can be used, a verification code has been sent',
+      });
+    });
 
-    const result =
-      await controller.requestOtp({
+    it('returns the generic response for a phone request', async () => {
+      await expect(
+        controller.requestOtp({
+          type: VerificationCodeType.PHONE,
+          identifier: '+201000000000',
+        }),
+      ).resolves.toEqual({
+        message:
+          'If the identifier can be used, a verification code has been sent',
+      });
+    });
+
+    it('propagates a service error without changing it', async () => {
+      const error = new BadRequestException('invalid identifier');
+
+      otpService.requestOtp.mockRejectedValue(error);
+
+      await expect(
+        controller.requestOtp({
+          type: VerificationCodeType.EMAIL,
+          identifier: 'invalid',
+        }),
+      ).rejects.toBe(error);
+    });
+
+    it('does not expose account existence through its response', async () => {
+      const response = await controller.requestOtp({
         type: VerificationCodeType.EMAIL,
-        identifier:
-          'missing@makook.local',
+        identifier: 'unknown@makook.local',
       });
 
-    expect(result).toEqual({
-      message:
-        'If the account exists, a verification code has been sent',
+      expect(response).toEqual({
+        message:
+          'If the identifier can be used, a verification code has been sent',
+      });
     });
   });
 
-  it('does not reveal whether a phone account exists', async () => {
-    otpService.requestOtp.mockResolvedValue(
-      undefined,
-    );
+  describe('verifyOtp', () => {
+    it('authenticates with a normalized email and returns tokens', async () => {
+      const authentication = {
+        sessionId: 'session-id',
+        refreshToken: 'refresh-token',
+        accessToken: 'access-token',
+      };
 
-    const result =
-      await controller.requestOtp({
-        type: VerificationCodeType.PHONE,
-        identifier:
-          '+201099999999',
-      });
+      authService.authenticateWithOtp.mockResolvedValue(authentication);
 
-    expect(result).toEqual({
-      message:
-        'If the account exists, a verification code has been sent',
+      await expect(
+        controller.verifyOtp({
+          type: VerificationCodeType.EMAIL,
+          identifier: '  TEST@MAKOOK.LOCAL  ',
+          code: '123456',
+          deviceId: 'device-id',
+        }),
+      ).resolves.toEqual(authentication);
+
+      expect(authService.authenticateWithOtp).toHaveBeenCalledTimes(1);
+      expect(authService.authenticateWithOtp).toHaveBeenCalledWith(
+        VerificationCodeType.EMAIL,
+        'test@makook.local',
+        '123456',
+        'device-id',
+      );
     });
-  });
 
-  it('verifies a valid email OTP', async () => {
-    const user = {
-      id: 'user-email-id',
-    };
+    it('authenticates with a normalized phone and returns tokens', async () => {
+      const authentication = {
+        sessionId: 'session-id',
+        refreshToken: 'refresh-token',
+        accessToken: 'access-token',
+      };
 
-    otpService.findUserByIdentifier.mockResolvedValue(
-      user,
-    );
+      authService.authenticateWithOtp.mockResolvedValue(authentication);
 
-    otpService.verifyCode.mockResolvedValue(
-      undefined,
-    );
+      await expect(
+        controller.verifyOtp({
+          type: VerificationCodeType.PHONE,
+          identifier: '  +201000000000  ',
+          code: '654321',
+          deviceId: 'device-123',
+        }),
+      ).resolves.toEqual(authentication);
 
-    const result =
+      expect(authService.authenticateWithOtp).toHaveBeenCalledTimes(1);
+      expect(authService.authenticateWithOtp).toHaveBeenCalledWith(
+        VerificationCodeType.PHONE,
+        '+201000000000',
+        '654321',
+        'device-123',
+      );
+    });
+
+    it('passes an omitted deviceId as undefined', async () => {
+      const authentication = {
+        sessionId: 'session-id',
+        refreshToken: 'refresh-token',
+        accessToken: 'access-token',
+      };
+
+      authService.authenticateWithOtp.mockResolvedValue(authentication);
+
       await controller.verifyOtp({
         type: VerificationCodeType.EMAIL,
-        identifier:
-          '  TEST@MAKOOK.LOCAL  ',
+        identifier: 'user@makook.local',
         code: '123456',
       });
 
-    expect(
-      otpService.findUserByIdentifier,
-    ).toHaveBeenCalledWith(
-      VerificationCodeType.EMAIL,
-      'test@makook.local',
-    );
-
-    expect(
-      otpService.verifyCode,
-    ).toHaveBeenCalledWith(
-      'user-email-id',
-      VerificationCodeType.EMAIL,
-      '123456',
-    );
-
-    expect(result).toEqual({
-      message:
-        'Verification code accepted',
-    });
-  });
-
-  it('verifies a valid phone OTP', async () => {
-    const user = {
-      id: 'user-phone-id',
-    };
-
-    otpService.findUserByIdentifier.mockResolvedValue(
-      user,
-    );
-
-    otpService.verifyCode.mockResolvedValue(
-      undefined,
-    );
-
-    const result =
-      await controller.verifyOtp({
-        type: VerificationCodeType.PHONE,
-        identifier:
-          '  +201000000000  ',
-        code: '654321',
-      });
-
-    expect(
-      otpService.findUserByIdentifier,
-    ).toHaveBeenCalledWith(
-      VerificationCodeType.PHONE,
-      '+201000000000',
-    );
-
-    expect(
-      otpService.verifyCode,
-    ).toHaveBeenCalledWith(
-      'user-phone-id',
-      VerificationCodeType.PHONE,
-      '654321',
-    );
-
-    expect(result).toEqual({
-      message:
-        'Verification code accepted',
-    });
-  });
-
-  it('does not call verifyCode when the user does not exist', async () => {
-    otpService.findUserByIdentifier.mockResolvedValue(
-      null,
-    );
-
-    const result =
-      await controller.verifyOtp({
-        type: VerificationCodeType.EMAIL,
-        identifier:
-          'missing@makook.local',
-        code: '123456',
-      });
-
-    expect(
-      otpService.verifyCode,
-    ).not.toHaveBeenCalled();
-
-    expect(result).toEqual({
-      message:
-        'Verification code accepted',
-    });
-  });
-
-  it('propagates an invalid OTP error', async () => {
-    const user = {
-      id: 'user-id',
-    };
-
-    otpService.findUserByIdentifier.mockResolvedValue(
-      user,
-    );
-
-    otpService.verifyCode.mockRejectedValue(
-      new UnauthorizedException(
-        'Invalid verification code',
-      ),
-    );
-
-    await expect(
-      controller.verifyOtp({
-        type: VerificationCodeType.EMAIL,
-        identifier:
-          'test@makook.local',
-        code: '000000',
-      }),
-    ).rejects.toThrow(
-      'Invalid verification code',
-    );
-  });
-
-  it('propagates the maximum-attempts error', async () => {
-    const user = {
-      id: 'user-id',
-    };
-
-    otpService.findUserByIdentifier.mockResolvedValue(
-      user,
-    );
-
-    otpService.verifyCode.mockRejectedValue(
-      new BadRequestException(
-        'Too many verification attempts',
-      ),
-    );
-
-    await expect(
-      controller.verifyOtp({
-        type: VerificationCodeType.EMAIL,
-        identifier:
-          'test@makook.local',
-        code: '123456',
-      }),
-    ).rejects.toThrow(
-      'Too many verification attempts',
-    );
-  });
-
-  it('does not modify the case of a phone identifier', async () => {
-    otpService.requestOtp.mockResolvedValue(
-      undefined,
-    );
-
-    await controller.requestOtp({
-      type: VerificationCodeType.PHONE,
-      identifier:
-        '  +201012345678  ',
+      expect(authService.authenticateWithOtp).toHaveBeenCalledWith(
+        VerificationCodeType.EMAIL,
+        'user@makook.local',
+        '123456',
+        undefined,
+      );
     });
 
-    expect(
-      otpService.requestOtp,
-    ).toHaveBeenCalledWith(
-      VerificationCodeType.PHONE,
-      '+201012345678',
-    );
+    it('propagates an authentication error without changing it', async () => {
+      const error = new UnauthorizedException('Invalid verification code');
+
+      authService.authenticateWithOtp.mockRejectedValue(error);
+
+      await expect(
+        controller.verifyOtp({
+          type: VerificationCodeType.EMAIL,
+          identifier: 'user@makook.local',
+          code: '123456',
+        }),
+      ).rejects.toBe(error);
+    });
   });
 });

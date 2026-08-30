@@ -6,13 +6,20 @@ import {
 import {
   createHash,
   randomInt,
+  timingSafeEqual,
 } from 'node:crypto';
 import {
   PrismaService,
 } from '../../prisma/prisma.service.js';
 import {
   VerificationCodeType,
+  UserStatus,
 } from '../../generated/prisma/enums.js';
+import { Prisma } from '../../generated/prisma/client.js';
+import {
+  isValidIdentifier,
+  normalizeIdentifier,
+} from '../../identity/identifier-normalizer.js';
 import {
   OtpDeliveryService,
 } from './otp-delivery.service.js';
@@ -23,6 +30,9 @@ export class OtpService {
     5 * 60 * 1000;
 
   private readonly maximumAttempts = 5;
+
+  private readonly invalidCodeMessage =
+    'Invalid or expired verification code';
 
   constructor(
     private readonly prisma: PrismaService,
@@ -47,48 +57,70 @@ export class OtpService {
       .digest('hex');
   }
 
+  private hashesMatch(left: string, right: string): boolean {
+    const leftBuffer = Buffer.from(left, 'hex');
+    const rightBuffer = Buffer.from(right, 'hex');
+
+    return (
+      leftBuffer.length === rightBuffer.length &&
+      timingSafeEqual(leftBuffer, rightBuffer)
+    );
+  }
+
+  private async lockOtp(
+    tx: Prisma.TransactionClient,
+    userId: string,
+    type: VerificationCodeType,
+  ): Promise<void> {
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(
+        hashtextextended(${`${userId}:${type}`}, 0)
+      )
+    `;
+  }
+
   async findUserByIdentifier(
     type: VerificationCodeType,
     identifier: string,
   ) {
-    if (
-      type ===
-      VerificationCodeType.EMAIL
-    ) {
-      return this.prisma.user.findUnique({
-        where: {
-          email: identifier,
-        },
-      });
-    }
-
-    if (
-      type ===
-      VerificationCodeType.PHONE
-    ) {
-      return this.prisma.user.findUnique({
-        where: {
-          phone: identifier,
-        },
-      });
-    }
-
-    throw new BadRequestException(
-      'Unsupported verification type',
+    const normalizedIdentifier = this.normalizeAndValidateIdentifier(
+      type,
+      identifier,
     );
+
+    if (type === VerificationCodeType.EMAIL) {
+      return this.prisma.user.findUnique({
+        where: {
+          email: normalizedIdentifier,
+        },
+      });
+    }
+
+    if (type === VerificationCodeType.PHONE) {
+      return this.prisma.user.findUnique({
+        where: {
+          phone: normalizedIdentifier,
+        },
+      });
+    }
+
+    return null;
   }
 
   async requestOtp(
     type: VerificationCodeType,
     identifier: string,
   ): Promise<void> {
-    const user =
-      await this.findUserByIdentifier(
-        type,
-        identifier,
-      );
+    const normalizedIdentifier = this.normalizeAndValidateIdentifier(
+      type,
+      identifier,
+    );
+    const user = await this.findOrCreateUser(
+      type,
+      normalizedIdentifier,
+    );
 
-    if (!user) {
+    if (user.status !== UserStatus.ACTIVE) {
       return;
     }
 
@@ -106,6 +138,8 @@ export class OtpService {
 
     await this.prisma.$transaction(
       async (tx) => {
+        await this.lockOtp(tx, user.id, type);
+
         await tx.verificationCode.updateMany({
           where: {
             userId: user.id,
@@ -130,7 +164,7 @@ export class OtpService {
 
     await this.deliveryService.send({
       type,
-      identifier,
+      identifier: normalizedIdentifier,
       code,
     });
   }
@@ -139,17 +173,6 @@ export class OtpService {
     userId: string,
     type: VerificationCodeType,
   ): Promise<string> {
-    await this.prisma.verificationCode.updateMany({
-      where: {
-        userId,
-        type,
-        usedAt: null,
-      },
-      data: {
-        usedAt: new Date(),
-      },
-    });
-
     const code =
       this.generateCode();
 
@@ -162,149 +185,221 @@ export class OtpService {
           this.codeLifetimeMs,
       );
 
-    await this.prisma.verificationCode.create({
-      data: {
-        userId,
-        type,
-        codeHash,
-        expiresAt,
-      },
-    });
+    await this.prisma.$transaction(async (tx) => {
+      await this.lockOtp(tx, userId, type);
 
-    return code;
-  }
-
-  async verifyCode(
-    userId: string,
-    type: VerificationCodeType,
-    code: string,
-  ): Promise<void> {
-    const verificationCode =
-      await this.prisma.verificationCode.findFirst({
+      await tx.verificationCode.updateMany({
         where: {
           userId,
           type,
           usedAt: null,
         },
-        orderBy: {
-          createdAt: 'desc',
-        },
-      });
-
-    if (!verificationCode) {
-      throw new UnauthorizedException(
-        'Invalid verification code',
-      );
-    }
-
-    if (
-      verificationCode.expiresAt <=
-      new Date()
-    ) {
-      throw new UnauthorizedException(
-        'Verification code has expired',
-      );
-    }
-
-    if (
-      verificationCode.attempts >=
-      this.maximumAttempts
-    ) {
-      throw new BadRequestException(
-        'Too many verification attempts',
-      );
-    }
-
-    const codeHash =
-      this.hashCode(code);
-
-    if (
-      codeHash !==
-      verificationCode.codeHash
-    ) {
-      await this.prisma.verificationCode.update({
-        where: {
-          id: verificationCode.id,
-        },
         data: {
-          attempts: {
-            increment: 1,
-          },
+          usedAt: new Date(),
         },
       });
 
-      throw new UnauthorizedException(
-        'Invalid verification code',
-      );
-    }
+      await tx.verificationCode.create({
+        data: {
+          userId,
+          type,
+          codeHash,
+          expiresAt,
+        },
+      });
+    });
 
-    await this.prisma.$transaction(
-      async (tx) => {
-        await tx.verificationCode.update({
+    return code;
+  }
+
+  async verifyCode<T = void>(
+    userId: string,
+    type: VerificationCodeType,
+    code: string,
+    onVerified?: (
+      tx: Prisma.TransactionClient,
+      verifiedUserId: string,
+    ) => Promise<T>,
+  ): Promise<T> {
+    const codeHash = this.hashCode(code);
+    const now = new Date();
+    let identifier = '';
+
+    const result = await this.prisma.$transaction(async (tx) => {
+      await this.lockOtp(tx, userId, type);
+
+      const verificationCode = await tx.verificationCode.findFirst({
+        where: {
+          userId,
+          type,
+          usedAt: null,
+        },
+        orderBy: [
+          { createdAt: 'desc' },
+          { id: 'desc' },
+        ],
+        include: {
+          user: true,
+        },
+      });
+
+      if (
+        !verificationCode ||
+        verificationCode.expiresAt <= now ||
+        verificationCode.attempts >= this.maximumAttempts ||
+        verificationCode.user.status !== UserStatus.ACTIVE
+      ) {
+        return { valid: false as const };
+      }
+
+      if (!this.hashesMatch(codeHash, verificationCode.codeHash)) {
+        const updated = await tx.verificationCode.updateMany({
           where: {
             id: verificationCode.id,
+            usedAt: null,
+            attempts: {
+              lt: this.maximumAttempts,
+            },
           },
           data: {
-            usedAt: new Date(),
+            attempts: {
+              increment: 1,
+            },
           },
         });
 
-        if (
-          type ===
-          VerificationCodeType.EMAIL
-        ) {
-          await tx.user.update({
+        if (updated.count === 1) {
+          await tx.verificationCode.updateMany({
             where: {
-              id: userId,
+              id: verificationCode.id,
+              usedAt: null,
+              attempts: {
+                gte: this.maximumAttempts,
+              },
             },
             data: {
-              emailVerifiedAt:
-                new Date(),
+              usedAt: now,
             },
           });
         }
 
-        if (
-          type ===
-          VerificationCodeType.PHONE
-        ) {
-          await tx.user.update({
-            where: {
-              id: userId,
-            },
-            data: {
-              phoneVerifiedAt:
-                new Date(),
-            },
-          });
-        }
-      },
-    );
+        return { valid: false as const };
+      }
 
-    this.deliveryService.clearDevelopmentCode(
-      type,
-      type === VerificationCodeType.EMAIL
-        ? (
-            await this.prisma.user.findUnique({
-              where: {
-                id: userId,
-              },
-              select: {
-                email: true,
-              },
-            })
-          )?.email ?? ''
-        : (
-            await this.prisma.user.findUnique({
-              where: {
-                id: userId,
-              },
-              select: {
-                phone: true,
-              },
-            })
-          )?.phone ?? '',
-    );
+      const activeUser = await tx.user.updateMany({
+        where: {
+          id: userId,
+          status: UserStatus.ACTIVE,
+        },
+        data: {
+          updatedAt: now,
+        },
+      });
+
+      if (activeUser.count !== 1) {
+        return { valid: false as const };
+      }
+
+      const consumed = await tx.verificationCode.updateMany({
+        where: {
+          id: verificationCode.id,
+          usedAt: null,
+          codeHash,
+          expiresAt: {
+            gt: now,
+          },
+          attempts: {
+            lt: this.maximumAttempts,
+          },
+        },
+        data: {
+          usedAt: now,
+        },
+      });
+
+      if (consumed.count !== 1) {
+        return { valid: false as const };
+      }
+
+      if (type === VerificationCodeType.EMAIL) {
+        await tx.user.updateMany({
+          where: {
+            id: userId,
+            status: UserStatus.ACTIVE,
+            emailVerifiedAt: null,
+          },
+          data: {
+            emailVerifiedAt: now,
+          },
+        });
+      } else {
+        await tx.user.updateMany({
+          where: {
+            id: userId,
+            status: UserStatus.ACTIVE,
+            phoneVerifiedAt: null,
+          },
+          data: {
+            phoneVerifiedAt: now,
+          },
+        });
+      }
+
+      identifier = type === VerificationCodeType.EMAIL
+        ? verificationCode.user.email ?? ''
+        : verificationCode.user.phone ?? '';
+
+      if (!onVerified) {
+        return { valid: true as const, value: undefined as T };
+      }
+
+      return {
+        valid: true as const,
+        value: await onVerified(tx, userId),
+      };
+    });
+
+    if (!result.valid) {
+      throw new UnauthorizedException(this.invalidCodeMessage);
+    }
+
+    this.deliveryService.clearDevelopmentCode(type, identifier);
+
+    return result.value;
+  }
+
+  private async findOrCreateUser(
+    type: VerificationCodeType,
+    identifier: string,
+  ) {
+    if (type === VerificationCodeType.EMAIL) {
+      return this.prisma.user.upsert({
+        where: { email: identifier },
+        update: {},
+        create: { email: identifier },
+      });
+    }
+
+    return this.prisma.user.upsert({
+      where: { phone: identifier },
+      update: {},
+      create: { phone: identifier },
+    });
+  }
+
+  private normalizeAndValidateIdentifier(
+    type: VerificationCodeType,
+    identifier: string,
+  ): string {
+    const normalizedIdentifier = normalizeIdentifier(type, identifier);
+
+    if (!isValidIdentifier(type, normalizedIdentifier)) {
+      throw new BadRequestException(
+        'identifier must be a valid email or international phone number',
+      );
+    }
+
+    return normalizedIdentifier;
   }
 
   async getCodeForDevelopment(

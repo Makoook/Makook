@@ -1,7 +1,17 @@
-import { ConflictException, Injectable } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  Injectable,
+} from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service.js';
 import { CreateUserDto } from './dto/create-user.dto.js';
+import {
+  isValidIdentifier,
+  normalizeEmail,
+  normalizePhone,
+} from './identifier-normalizer.js';
 import { UserResponseDto } from './dto/user-response.dto.js';
+import { VerificationCodeType } from '../generated/prisma/enums.js';
 
 @Injectable()
 export class IdentityService {
@@ -42,8 +52,17 @@ export class IdentityService {
   }
 
   async createUser(dto: CreateUserDto): Promise<UserResponseDto> {
-    const phone = dto.phone;
-    const email = dto.email;
+    const phone = dto.phone ? normalizePhone(dto.phone) : undefined;
+    const email = dto.email ? normalizeEmail(dto.email) : undefined;
+
+    if (
+      (phone && !isValidIdentifier(VerificationCodeType.PHONE, phone)) ||
+      (email && !isValidIdentifier(VerificationCodeType.EMAIL, email))
+    ) {
+      throw new BadRequestException(
+        'phone and email must be valid normalized identifiers',
+      );
+    }
 
     if (!phone && !email) {
       throw new ConflictException('phone or email is required');

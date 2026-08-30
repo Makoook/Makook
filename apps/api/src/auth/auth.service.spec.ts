@@ -3,12 +3,19 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { JwtService } from '@nestjs/jwt';
 import { AuthService } from './auth.service.js';
 import { PrismaService } from '../prisma/prisma.service.js';
+import { VerificationCodeType, UserStatus } from '../generated/prisma/enums.js';
+import { OtpDeliveryService } from './otp/otp-delivery.service.js';
+import { OtpService } from './otp/otp.service.js';
+import { IdentityService } from '../identity/identity.service.js';
 
 describe('AuthService - Session and Access Token', () => {
   let prisma: PrismaService;
   let authService: AuthService;
   let jwtService: JwtService;
+  let otpService: OtpService;
+  let deliveryService: OtpDeliveryService;
   let userId: string;
+  const createdUserIds: string[] = [];
 
   beforeAll(async () => {
     prisma = new PrismaService();
@@ -21,7 +28,9 @@ describe('AuthService - Session and Access Token', () => {
       },
     });
 
-    authService = new AuthService(prisma, jwtService);
+    deliveryService = new OtpDeliveryService();
+    otpService = new OtpService(prisma, deliveryService);
+    authService = new AuthService(prisma, jwtService, otpService);
 
     const user = await prisma.user.create({
       data: {
@@ -30,19 +39,32 @@ describe('AuthService - Session and Access Token', () => {
     });
 
     userId = user.id;
+    createdUserIds.push(userId);
   });
 
   afterAll(async () => {
-    if (userId) {
+    if (createdUserIds.length > 0) {
       await prisma.session.deleteMany({
         where: {
-          userId,
+          userId: {
+            in: createdUserIds,
+          },
         },
       });
 
-      await prisma.user.delete({
+      await prisma.verificationCode.deleteMany({
         where: {
-          id: userId,
+          userId: {
+            in: createdUserIds,
+          },
+        },
+      });
+
+      await prisma.user.deleteMany({
+        where: {
+          id: {
+            in: createdUserIds,
+          },
         },
       });
     }
@@ -261,4 +283,282 @@ describe('AuthService - Session and Access Token', () => {
       15 * 60,
     );
   });
+
+  it('authenticates a new email identifier and creates a session', async () => {
+    const email = `otp-auth-email-${Date.now()}@makook.local`;
+    const { user, code } = await requestOtpAndGetCode(
+      VerificationCodeType.EMAIL,
+      email,
+    );
+
+    expect(user.emailVerifiedAt).toBeNull();
+
+    const result = await authService.authenticateWithOtp(
+      VerificationCodeType.EMAIL,
+      email,
+      code,
+      'email-device',
+    );
+
+    const session = await prisma.session.findUnique({
+      where: { id: result.sessionId },
+    });
+    const authenticatedUser = await prisma.user.findUnique({
+      where: { id: user.id },
+    });
+    const payload = await jwtService.verifyAsync(result.accessToken);
+
+    expect(authenticatedUser?.emailVerifiedAt).not.toBeNull();
+    expect(session?.userId).toBe(user.id);
+    expect(session?.deviceId).toBe('email-device');
+    expect(session?.refreshTokenHash).toBe(
+      createHash('sha256').update(result.refreshToken).digest('hex'),
+    );
+    expect(session?.refreshTokenHash).not.toBe(result.refreshToken);
+    expect(payload.sub).toBe(user.id);
+    expect(payload.sid).toBe(result.sessionId);
+  });
+
+  it('authenticates a new phone identifier', async () => {
+    const phone = `+201${Date.now().toString().slice(-10)}`;
+    const { user, code } = await requestOtpAndGetCode(
+      VerificationCodeType.PHONE,
+      phone,
+    );
+
+    const result = await authService.authenticateWithOtp(
+      VerificationCodeType.PHONE,
+      phone,
+      code,
+    );
+
+    const authenticatedUser = await prisma.user.findUnique({
+      where: { id: user.id },
+    });
+
+    expect(result.sessionId).toBeTruthy();
+    expect(authenticatedUser?.phoneVerifiedAt).not.toBeNull();
+  });
+
+  it('authenticates an existing active user without replacing verification time', async () => {
+    const email = `otp-auth-verified-${Date.now()}@makook.local`;
+    const verifiedAt = new Date('2026-01-01T00:00:00.000Z');
+    const user = await prisma.user.create({
+      data: { email, emailVerifiedAt: verifiedAt },
+    });
+    createdUserIds.push(user.id);
+
+    const { code } = await requestOtpAndGetCode(
+      VerificationCodeType.EMAIL,
+      email,
+    );
+    const result = await authService.authenticateWithOtp(
+      VerificationCodeType.EMAIL,
+      email,
+      code,
+    );
+    const authenticatedUser = await prisma.user.findUnique({
+      where: { id: user.id },
+    });
+
+    expect(result.sessionId).toBeTruthy();
+    expect(authenticatedUser?.emailVerifiedAt).toEqual(verifiedAt);
+  });
+
+  it('uses the same email and phone normalization for identity and OTP authentication', async () => {
+    const identityService = new IdentityService(prisma);
+    const email = `otp-auth-normalized-${Date.now()}@makook.local`;
+    const phone = `+201${Date.now().toString().slice(-10)}`;
+    const emailUser = await identityService.createUser({
+      email: `  ${email.toUpperCase()}  `,
+    });
+    const phoneUser = await identityService.createUser({
+      phone: `  ${phone}  `,
+    });
+    createdUserIds.push(emailUser.id, phoneUser.id);
+
+    await otpService.requestOtp(
+      VerificationCodeType.EMAIL,
+      `  ${email.toUpperCase()}  `,
+    );
+    await otpService.requestOtp(
+      VerificationCodeType.PHONE,
+      `  ${phone}  `,
+    );
+    const emailCode = await otpService.getCodeForDevelopment(
+      emailUser.id,
+      VerificationCodeType.EMAIL,
+    );
+    const phoneCode = await otpService.getCodeForDevelopment(
+      phoneUser.id,
+      VerificationCodeType.PHONE,
+    );
+
+    await authService.authenticateWithOtp(
+      VerificationCodeType.EMAIL,
+      `  ${email.toUpperCase()}  `,
+      emailCode,
+    );
+    await authService.authenticateWithOtp(
+      VerificationCodeType.PHONE,
+      `  ${phone}  `,
+      phoneCode,
+    );
+
+    expect(emailUser.email).toBe(email);
+    expect(phoneUser.phone).toBe(phone);
+  });
+
+  it.each([UserStatus.SUSPENDED, UserStatus.DELETED])(
+    'does not authenticate a %s user',
+    async (status) => {
+      const email = `otp-auth-${status.toLowerCase()}-${Date.now()}@makook.local`;
+      const user = await prisma.user.create({
+        data: { email, status },
+      });
+      createdUserIds.push(user.id);
+      const code = await otpService.createCode(
+        user.id,
+        VerificationCodeType.EMAIL,
+      );
+
+      await expect(
+        authService.authenticateWithOtp(
+          VerificationCodeType.EMAIL,
+          email,
+          code,
+        ),
+      ).rejects.toThrow('Invalid or expired verification code');
+
+      await expect(
+        prisma.session.count({ where: { userId: user.id } }),
+      ).resolves.toBe(0);
+    },
+  );
+
+  it('returns the generic failure for unknown, wrong, expired, and used OTPs', async () => {
+    const email = `otp-auth-failures-${Date.now()}@makook.local`;
+
+    await expect(
+      authService.authenticateWithOtp(
+        VerificationCodeType.EMAIL,
+        email,
+        '123456',
+      ),
+    ).rejects.toThrow('Invalid or expired verification code');
+
+    const { user, code } = await requestOtpAndGetCode(
+      VerificationCodeType.EMAIL,
+      email,
+    );
+
+    await expect(
+      authService.authenticateWithOtp(
+        VerificationCodeType.EMAIL,
+        email,
+        '000000',
+      ),
+    ).rejects.toThrow('Invalid or expired verification code');
+
+    await prisma.verificationCode.updateMany({
+      where: { userId: user.id, usedAt: null },
+      data: { expiresAt: new Date(Date.now() - 1) },
+    });
+
+    await expect(
+      authService.authenticateWithOtp(
+        VerificationCodeType.EMAIL,
+        email,
+        code,
+      ),
+    ).rejects.toThrow('Invalid or expired verification code');
+
+    const replacement = await otpService.createCode(
+      user.id,
+      VerificationCodeType.EMAIL,
+    );
+    await authService.authenticateWithOtp(
+      VerificationCodeType.EMAIL,
+      email,
+      replacement,
+    );
+
+    await expect(
+      authService.authenticateWithOtp(
+        VerificationCodeType.EMAIL,
+        email,
+        replacement,
+      ),
+    ).rejects.toThrow('Invalid or expired verification code');
+  });
+
+  it('returns the generic failure after the OTP attempt limit', async () => {
+    const email = `otp-auth-attempts-${Date.now()}@makook.local`;
+    const { code } = await requestOtpAndGetCode(
+      VerificationCodeType.EMAIL,
+      email,
+    );
+
+    for (let attempt = 0; attempt < 5; attempt++) {
+      await expect(
+        authService.authenticateWithOtp(
+          VerificationCodeType.EMAIL,
+          email,
+          '000000',
+        ),
+      ).rejects.toThrow('Invalid or expired verification code');
+    }
+
+    await expect(
+      authService.authenticateWithOtp(
+        VerificationCodeType.EMAIL,
+        email,
+        code,
+      ),
+    ).rejects.toThrow('Invalid or expired verification code');
+  });
+
+  it('allows at most one concurrent authentication for one OTP', async () => {
+    const email = `otp-auth-concurrent-${Date.now()}@makook.local`;
+    const { user, code } = await requestOtpAndGetCode(
+      VerificationCodeType.EMAIL,
+      email,
+    );
+
+    const results = await Promise.allSettled([
+      authService.authenticateWithOtp(
+        VerificationCodeType.EMAIL,
+        email,
+        code,
+      ),
+      authService.authenticateWithOtp(
+        VerificationCodeType.EMAIL,
+        email,
+        code,
+      ),
+    ]);
+
+    expect(results.filter(({ status }) => status === 'fulfilled')).toHaveLength(1);
+    await expect(
+      prisma.session.count({ where: { userId: user.id } }),
+    ).resolves.toBe(1);
+  });
+
+  async function requestOtpAndGetCode(
+    type: VerificationCodeType,
+    identifier: string,
+  ) {
+    await otpService.requestOtp(type, identifier);
+    const user = await otpService.findUserByIdentifier(type, identifier);
+
+    if (!user) {
+      throw new Error('Expected OTP request to create a user');
+    }
+
+    createdUserIds.push(user.id);
+
+    const code = await otpService.getCodeForDevelopment(user.id, type);
+
+    return { user, code };
+  }
 });
