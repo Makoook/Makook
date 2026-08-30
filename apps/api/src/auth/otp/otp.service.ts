@@ -13,6 +13,9 @@ import {
 import {
   VerificationCodeType,
 } from '../../generated/prisma/enums.js';
+import {
+  OtpDeliveryService,
+} from './otp-delivery.service.js';
 
 @Injectable()
 export class OtpService {
@@ -23,6 +26,7 @@ export class OtpService {
 
   constructor(
     private readonly prisma: PrismaService,
+    private readonly deliveryService: OtpDeliveryService,
   ) {}
 
   private generateCode(): string {
@@ -41,6 +45,94 @@ export class OtpService {
     return createHash('sha256')
       .update(code)
       .digest('hex');
+  }
+
+  async findUserByIdentifier(
+    type: VerificationCodeType,
+    identifier: string,
+  ) {
+    if (
+      type ===
+      VerificationCodeType.EMAIL
+    ) {
+      return this.prisma.user.findUnique({
+        where: {
+          email: identifier,
+        },
+      });
+    }
+
+    if (
+      type ===
+      VerificationCodeType.PHONE
+    ) {
+      return this.prisma.user.findUnique({
+        where: {
+          phone: identifier,
+        },
+      });
+    }
+
+    throw new BadRequestException(
+      'Unsupported verification type',
+    );
+  }
+
+  async requestOtp(
+    type: VerificationCodeType,
+    identifier: string,
+  ): Promise<void> {
+    const user =
+      await this.findUserByIdentifier(
+        type,
+        identifier,
+      );
+
+    if (!user) {
+      return;
+    }
+
+    const code =
+      this.generateCode();
+
+    const codeHash =
+      this.hashCode(code);
+
+    const expiresAt =
+      new Date(
+        Date.now() +
+          this.codeLifetimeMs,
+      );
+
+    await this.prisma.$transaction(
+      async (tx) => {
+        await tx.verificationCode.updateMany({
+          where: {
+            userId: user.id,
+            type,
+            usedAt: null,
+          },
+          data: {
+            usedAt: new Date(),
+          },
+        });
+
+        await tx.verificationCode.create({
+          data: {
+            userId: user.id,
+            type,
+            codeHash,
+            expiresAt,
+          },
+        });
+      },
+    );
+
+    await this.deliveryService.send({
+      type,
+      identifier,
+      code,
+    });
   }
 
   async createCode(
@@ -188,6 +280,31 @@ export class OtpService {
         }
       },
     );
+
+    this.deliveryService.clearDevelopmentCode(
+      type,
+      type === VerificationCodeType.EMAIL
+        ? (
+            await this.prisma.user.findUnique({
+              where: {
+                id: userId,
+              },
+              select: {
+                email: true,
+              },
+            })
+          )?.email ?? ''
+        : (
+            await this.prisma.user.findUnique({
+              where: {
+                id: userId,
+              },
+              select: {
+                phone: true,
+              },
+            })
+          )?.phone ?? '',
+    );
   }
 
   async getCodeForDevelopment(
@@ -203,35 +320,42 @@ export class OtpService {
       );
     }
 
-    const verificationCode =
-      await this.prisma.verificationCode.findFirst({
+    const user =
+      await this.prisma.user.findUnique({
         where: {
-          userId,
-          type,
-          usedAt: null,
-        },
-        orderBy: {
-          createdAt: 'desc',
+          id: userId,
         },
       });
 
-    if (!verificationCode) {
+    if (!user) {
       throw new BadRequestException(
-        'No active verification code found',
+        'User not found',
       );
     }
 
-    if (
-      verificationCode.expiresAt <=
-      new Date()
-    ) {
+    const identifier =
+      type === VerificationCodeType.EMAIL
+        ? user.email
+        : user.phone;
+
+    if (!identifier) {
       throw new BadRequestException(
-        'Verification code has expired',
+        'User does not have the requested identifier',
       );
     }
 
-    throw new BadRequestException(
-      'The OTP is intentionally not recoverable because only its hash is stored',
-    );
+    const code =
+      this.deliveryService.getDevelopmentCode(
+        type,
+        identifier,
+      );
+
+    if (!code) {
+      throw new BadRequestException(
+        'No active development verification code found',
+      );
+    }
+
+    return code;
   }
 }

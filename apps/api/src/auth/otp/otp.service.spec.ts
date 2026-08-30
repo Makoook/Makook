@@ -1,5 +1,8 @@
 import { createHash } from 'node:crypto';
 import {
+  OtpDeliveryService,
+} from './otp-delivery.service.js';
+import {
   afterAll,
   beforeAll,
   describe,
@@ -13,6 +16,7 @@ import { PrismaService } from '../../prisma/prisma.service.js';
 describe('OtpService', () => {
   let prisma: PrismaService;
   let otpService: OtpService;
+  let deliveryService: OtpDeliveryService;
   let userId: string;
 
   beforeAll(async () => {
@@ -20,7 +24,14 @@ describe('OtpService', () => {
 
     await prisma.$connect();
 
-    otpService = new OtpService(prisma);
+    deliveryService =
+  new OtpDeliveryService();
+
+    otpService =
+  new OtpService(
+    prisma,
+    deliveryService,
+  );
 
     const user = await prisma.user.create({
       data: {
