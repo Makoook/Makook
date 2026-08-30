@@ -87,6 +87,7 @@ model RolePermission {
 model Session {
   id               String   @id @default(uuid())
   userId           String
+  familyId         String
   refreshTokenHash String
   deviceId         String?
   expiresAt        DateTime
@@ -96,6 +97,7 @@ model Session {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  @@index([familyId])
   @@index([expiresAt])
 }
 

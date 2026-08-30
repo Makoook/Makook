@@ -115,6 +115,9 @@ describe('AuthController - Refresh Endpoint', () => {
 
     expect(newSession).not.toBeNull();
     expect(newSession?.userId).toBe(userId);
+    expect(newSession?.familyId).toBe(
+      revokedOldSession?.familyId,
+    );
     expect(newSession?.revokedAt).toBeNull();
   });
 
@@ -152,7 +155,7 @@ describe('AuthController - Refresh Endpoint', () => {
       .expect(401);
 
     expect(secondResponse.body.message).toBe(
-      'Invalid session',
+      'Invalid refresh token',
     );
   });
 
@@ -234,36 +237,34 @@ describe('AuthController - Refresh Endpoint', () => {
   });
 
   async function createTestSessionAndGetRefreshToken(): Promise<string> {
-    const refreshTokenResult =
-      await prisma.$transaction(async (tx) => {
-        const crypto = await import('node:crypto');
+    return prisma.$transaction(async (tx) => {
+      const crypto = await import('node:crypto');
 
-        const refreshToken = crypto
-          .randomBytes(48)
-          .toString('base64url');
+      const refreshToken = crypto
+        .randomBytes(48)
+        .toString('base64url');
 
-        const refreshTokenHash = crypto
-          .createHash('sha256')
-          .update(refreshToken)
-          .digest('hex');
+      const refreshTokenHash = crypto
+        .createHash('sha256')
+        .update(refreshToken)
+        .digest('hex');
 
-        const expiresAt = new Date();
+      const expiresAt = new Date();
 
-        expiresAt.setDate(
-          expiresAt.getDate() + 30,
-        );
+      expiresAt.setDate(
+        expiresAt.getDate() + 30,
+      );
 
-        await tx.session.create({
-          data: {
-            userId,
-            refreshTokenHash,
-            expiresAt,
-          },
-        });
-
-        return refreshToken;
+      await tx.session.create({
+        data: {
+          userId,
+          familyId: userId,
+          refreshTokenHash,
+          expiresAt,
+        },
       });
 
-    return refreshTokenResult;
+      return refreshToken;
+    });
   }
 });

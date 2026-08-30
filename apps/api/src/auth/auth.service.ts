@@ -1,8 +1,12 @@
-import { Injectable, UnauthorizedException } from '@nestjs/common';
+import {
+  Injectable,
+  UnauthorizedException,
+} from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import {
   createHash,
   randomBytes,
+  randomUUID,
   timingSafeEqual,
 } from 'node:crypto';
 import { PrismaService } from '../prisma/prisma.service.js';
@@ -23,10 +27,15 @@ export class AuthService {
   }
 
   private hashRefreshToken(token: string): string {
-    return createHash('sha256').update(token).digest('hex');
+    return createHash('sha256')
+      .update(token)
+      .digest('hex');
   }
 
-  private hashesMatch(left: string, right: string): boolean {
+  private hashesMatch(
+    left: string,
+    right: string,
+  ): boolean {
     const leftBuffer = Buffer.from(left, 'hex');
     const rightBuffer = Buffer.from(right, 'hex');
 
@@ -34,6 +43,38 @@ export class AuthService {
       leftBuffer.length === rightBuffer.length &&
       timingSafeEqual(leftBuffer, rightBuffer)
     );
+  }
+
+  private async tryLockRefreshSession(
+    tx: Prisma.TransactionClient,
+    sessionId: string,
+  ): Promise<boolean> {
+    const result = await tx.$queryRaw<
+      Array<{ locked: boolean }>
+    >`
+      SELECT pg_try_advisory_xact_lock(
+        hashtextextended(
+          ${`refresh-session:${sessionId}`},
+          0
+        )
+      ) AS locked
+    `;
+
+    return result[0]?.locked === true;
+  }
+
+  private async lockSessionFamily(
+    tx: Prisma.TransactionClient,
+    familyId: string,
+  ): Promise<void> {
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(
+        hashtextextended(
+          ${`refresh-family:${familyId}`},
+          0
+        )
+      )
+    `;
   }
 
   async createSession(
@@ -70,10 +111,11 @@ export class AuthService {
     refreshToken: string;
     accessToken: string;
   }> {
-    const user = await this.otpService.findUserByIdentifier(
-      type,
-      identifier,
-    );
+    const user =
+      await this.otpService.findUserByIdentifier(
+        type,
+        identifier,
+      );
 
     if (!user) {
       throw new UnauthorizedException(
@@ -81,18 +123,24 @@ export class AuthService {
       );
     }
 
-    const session = await this.otpService.verifyCode(
-      user.id,
-      type,
-      code,
-      (tx, userId) =>
-        this.createSessionWithClient(tx, userId, deviceId),
-    );
+    const session =
+      await this.otpService.verifyCode(
+        user.id,
+        type,
+        code,
+        (tx, userId) =>
+          this.createSessionWithClient(
+            tx,
+            userId,
+            deviceId,
+          ),
+      );
 
-    const accessToken = await this.createAccessToken(
-      user.id,
-      session.sessionId,
-    );
+    const accessToken =
+      await this.createAccessToken(
+        user.id,
+        session.sessionId,
+      );
 
     return {
       sessionId: session.sessionId,
@@ -105,24 +153,35 @@ export class AuthService {
     sessionId: string,
     refreshToken: string,
   ) {
-    const session = await this.prisma.session.findUnique({
-      where: {
-        id: sessionId,
-      },
-    });
+    const session =
+      await this.prisma.session.findUnique({
+        where: {
+          id: sessionId,
+        },
+      });
 
     if (
       !session ||
       session.revokedAt ||
       session.expiresAt <= new Date()
     ) {
-      throw new UnauthorizedException('Invalid session');
+      throw new UnauthorizedException(
+        'Invalid session',
+      );
     }
 
-    const refreshTokenHash = this.hashRefreshToken(refreshToken);
+    const refreshTokenHash =
+      this.hashRefreshToken(refreshToken);
 
-    if (!this.hashesMatch(refreshTokenHash, session.refreshTokenHash)) {
-      throw new UnauthorizedException('Invalid refresh token');
+    if (
+      !this.hashesMatch(
+        refreshTokenHash,
+        session.refreshTokenHash,
+      )
+    ) {
+      throw new UnauthorizedException(
+        'Invalid refresh token',
+      );
     }
 
     return session;
@@ -136,55 +195,222 @@ export class AuthService {
     refreshToken: string;
     accessToken: string;
   }> {
-    const session = await this.validateRefreshToken(
-      sessionId,
-      refreshToken,
-    );
-
-    const newRefreshToken = this.generateRefreshToken();
+    const newRefreshToken =
+      this.generateRefreshToken();
 
     const newRefreshTokenHash =
-      this.hashRefreshToken(newRefreshToken);
+      this.hashRefreshToken(
+        newRefreshToken,
+      );
 
     const newExpiresAt = new Date();
 
-    newExpiresAt.setDate(newExpiresAt.getDate() + 30);
-
-    const result = await this.prisma.$transaction(async (tx) => {
-      await tx.session.update({
-        where: {
-          id: session.id,
-        },
-        data: {
-          revokedAt: new Date(),
-        },
-      });
-
-      const newSession = await tx.session.create({
-        data: {
-          userId: session.userId,
-          refreshTokenHash: newRefreshTokenHash,
-          deviceId: session.deviceId,
-          expiresAt: newExpiresAt,
-        },
-      });
-
-      return newSession;
-    });
-
-    const accessToken = await this.createAccessToken(
-      session.userId,
-      result.id,
+    newExpiresAt.setDate(
+      newExpiresAt.getDate() + 30,
     );
 
+    const result =
+      await this.prisma.$transaction(
+        async (tx) => {
+          /*
+           * Do not wait for another refresh request
+           * using the same session.
+           *
+           * If another request currently owns this
+           * lock, this is a concurrent refresh attempt.
+           */
+          const lockAcquired =
+            await this.tryLockRefreshSession(
+              tx,
+              sessionId,
+            );
+
+          if (!lockAcquired) {
+            throw new UnauthorizedException(
+              'Invalid refresh token',
+            );
+          }
+
+          const session =
+            await tx.session.findUnique({
+              where: {
+                id: sessionId,
+              },
+            });
+
+          if (!session) {
+            throw new UnauthorizedException(
+              'Invalid session',
+            );
+          }
+
+          /*
+           * Lock the complete session family.
+           *
+           * This protects family-wide replay
+           * revocation.
+           */
+          await this.lockSessionFamily(
+            tx,
+            session.familyId,
+          );
+
+          /*
+           * Re-read after acquiring the family lock.
+           */
+          const currentSession =
+            await tx.session.findUnique({
+              where: {
+                id: sessionId,
+              },
+            });
+
+          if (
+            !currentSession ||
+            currentSession.expiresAt <= new Date()
+          ) {
+            throw new UnauthorizedException(
+              'Invalid session',
+            );
+          }
+
+          const refreshTokenHash =
+            this.hashRefreshToken(
+              refreshToken,
+            );
+
+          /*
+           * REPLAY DETECTION
+           *
+           * The session is already revoked and the
+           * presented token matches the original token.
+           *
+           * This is a genuine refresh-token replay.
+           *
+           * Revoke EVERY session in the family,
+           * including sessions already revoked.
+           *
+           * We return "replay" instead of throwing here,
+           * because throwing inside the transaction would
+           * rollback the family revocation.
+           */
+          if (currentSession.revokedAt) {
+            const isReplay =
+              this.hashesMatch(
+                refreshTokenHash,
+                currentSession.refreshTokenHash,
+              );
+
+            if (isReplay) {
+              await tx.session.updateMany({
+                where: {
+                  familyId:
+                    currentSession.familyId,
+                },
+                data: {
+                  revokedAt: new Date(),
+                },
+              });
+
+              return {
+                kind: 'replay' as const,
+              };
+            }
+
+            return {
+              kind: 'invalid' as const,
+            };
+          }
+
+          /*
+           * Active session but incorrect token.
+           */
+          if (
+            !this.hashesMatch(
+              refreshTokenHash,
+              currentSession.refreshTokenHash,
+            )
+          ) {
+            return {
+              kind: 'invalid' as const,
+            };
+          }
+
+          /*
+           * Revoke the current session.
+           */
+          const revokedAt = new Date();
+
+          await tx.session.update({
+            where: {
+              id: currentSession.id,
+            },
+            data: {
+              revokedAt,
+            },
+          });
+
+          /*
+           * Create the replacement session in the
+           * SAME session family.
+           */
+          const newSession =
+            await tx.session.create({
+              data: {
+                userId:
+                  currentSession.userId,
+                familyId:
+                  currentSession.familyId,
+                refreshTokenHash:
+                  newRefreshTokenHash,
+                deviceId:
+                  currentSession.deviceId,
+                expiresAt:
+                  newExpiresAt,
+              },
+            });
+
+          return {
+            kind: 'success' as const,
+            userId:
+              currentSession.userId,
+            sessionId: newSession.id,
+            refreshToken: newRefreshToken,
+          };
+        },
+      );
+
+    /*
+     * The transaction has already committed here.
+     *
+     * Therefore, if this was a replay, the family
+     * revocation has already been permanently saved.
+     */
+    if (
+      result.kind === 'replay' ||
+      result.kind === 'invalid'
+    ) {
+      throw new UnauthorizedException(
+        'Invalid refresh token',
+      );
+    }
+
+    const accessToken =
+      await this.createAccessToken(
+        result.userId,
+        result.sessionId,
+      );
+
     return {
-      sessionId: result.id,
-      refreshToken: newRefreshToken,
+      sessionId: result.sessionId,
+      refreshToken: result.refreshToken,
       accessToken,
     };
   }
 
-  async revokeSession(sessionId: string): Promise<void> {
+  async revokeSession(
+    sessionId: string,
+  ): Promise<void> {
     await this.prisma.session.updateMany({
       where: {
         id: sessionId,
@@ -197,27 +423,39 @@ export class AuthService {
   }
 
   private async createSessionWithClient(
-    client: Prisma.TransactionClient | PrismaService,
+    client:
+      | Prisma.TransactionClient
+      | PrismaService,
     userId: string,
     deviceId?: string,
   ): Promise<{
     sessionId: string;
     refreshToken: string;
   }> {
-    const refreshToken = this.generateRefreshToken();
-    const refreshTokenHash = this.hashRefreshToken(refreshToken);
+    const refreshToken =
+      this.generateRefreshToken();
+
+    const refreshTokenHash =
+      this.hashRefreshToken(
+        refreshToken,
+      );
+
     const expiresAt = new Date();
 
-    expiresAt.setDate(expiresAt.getDate() + 30);
+    expiresAt.setDate(
+      expiresAt.getDate() + 30,
+    );
 
-    const session = await client.session.create({
-      data: {
-        userId,
-        refreshTokenHash,
-        deviceId,
-        expiresAt,
-      },
-    });
+    const session =
+      await client.session.create({
+        data: {
+          userId,
+          familyId: randomUUID(),
+          refreshTokenHash,
+          deviceId,
+          expiresAt,
+        },
+      });
 
     return {
       sessionId: session.id,
