@@ -13,6 +13,11 @@ enum UserStatus {
   DELETED
 }
 
+enum VerificationCodeType {
+  EMAIL
+  PHONE
+}
+
 model User {
   id              String     @id @default(uuid())
   phone           String?    @unique
@@ -25,9 +30,10 @@ model User {
   updatedAt DateTime  @updatedAt
   deletedAt DateTime?
 
-  roles    UserRole[]
-  sessions Session[]
-  devices  Device[]
+  roles             UserRole[]
+  sessions          Session[]
+  devices           Device[]
+  verificationCodes VerificationCode[]
 
   @@index([status])
   @@index([createdAt])
@@ -94,15 +100,31 @@ model Session {
 }
 
 model Device {
-  id                String   @id @default(uuid())
-  userId            String
-  platform          String
-  deviceIdentifier  String?
-  pushToken         String?
-  lastSeenAt        DateTime?
-  createdAt         DateTime @default(now())
+  id               String   @id @default(uuid())
+  userId           String
+  platform         String
+  deviceIdentifier String?
+  pushToken        String?
+  lastSeenAt       DateTime?
+  createdAt        DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+}
+
+model VerificationCode {
+  id         String               @id @default(uuid())
+  userId     String
+  type       VerificationCodeType
+  codeHash   String
+  expiresAt  DateTime
+  usedAt     DateTime?
+  attempts   Int                  @default(0)
+  createdAt  DateTime             @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, type])
+  @@index([expiresAt])
 }
