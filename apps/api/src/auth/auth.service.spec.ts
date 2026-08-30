@@ -38,8 +38,16 @@ describe('AuthService - Session and Access Token', () => {
     });
 
     deliveryService = new OtpDeliveryService();
-    otpService = new OtpService(prisma, deliveryService);
-    authService = new AuthService(prisma, jwtService, otpService);
+    otpService = new OtpService(
+      prisma,
+      deliveryService,
+    );
+
+    authService = new AuthService(
+      prisma,
+      jwtService,
+      otpService,
+    );
 
     const user = await prisma.user.create({
       data: {
@@ -90,13 +98,16 @@ describe('AuthService - Session and Access Token', () => {
     expect(result.sessionId).toBeTruthy();
     expect(result.refreshToken).toBeTruthy();
 
-    expect(result.refreshToken.length).toBeGreaterThan(50);
+    expect(result.refreshToken.length).toBeGreaterThan(
+      50,
+    );
 
-    const session = await prisma.session.findUnique({
-      where: {
-        id: result.sessionId,
-      },
-    });
+    const session =
+      await prisma.session.findUnique({
+        where: {
+          id: result.sessionId,
+        },
+      });
 
     expect(session).not.toBeNull();
     expect(session?.userId).toBe(userId);
@@ -107,7 +118,9 @@ describe('AuthService - Session and Access Token', () => {
       .update(result.refreshToken)
       .digest('hex');
 
-    expect(session?.refreshTokenHash).toBe(expectedHash);
+    expect(session?.refreshTokenHash).toBe(
+      expectedHash,
+    );
 
     expect(session?.refreshTokenHash).not.toBe(
       result.refreshToken,
@@ -115,19 +128,22 @@ describe('AuthService - Session and Access Token', () => {
   });
 
   it('validates the correct refresh token', async () => {
-    const result = await authService.createSession(userId);
+    const result =
+      await authService.createSession(userId);
 
-    const session = await authService.validateRefreshToken(
-      result.sessionId,
-      result.refreshToken,
-    );
+    const session =
+      await authService.validateRefreshToken(
+        result.sessionId,
+        result.refreshToken,
+      );
 
     expect(session.id).toBe(result.sessionId);
     expect(session.userId).toBe(userId);
   });
 
   it('rejects an invalid refresh token', async () => {
-    const result = await authService.createSession(userId);
+    const result =
+      await authService.createSession(userId);
 
     await expect(
       authService.validateRefreshToken(
@@ -138,9 +154,12 @@ describe('AuthService - Session and Access Token', () => {
   });
 
   it('rejects a revoked session', async () => {
-    const result = await authService.createSession(userId);
+    const result =
+      await authService.createSession(userId);
 
-    await authService.revokeSession(result.sessionId);
+    await authService.revokeSession(
+      result.sessionId,
+    );
 
     await expect(
       authService.validateRefreshToken(
@@ -151,35 +170,44 @@ describe('AuthService - Session and Access Token', () => {
   });
 
   it('creates an access token with user and session identifiers', async () => {
-    const sessionResult = await authService.createSession(userId);
+    const sessionResult =
+      await authService.createSession(userId);
 
-    const accessToken = await authService.createAccessToken(
-      userId,
-      sessionResult.sessionId,
-    );
+    const accessToken =
+      await authService.createAccessToken(
+        userId,
+        sessionResult.sessionId,
+      );
 
     expect(accessToken).toBeTruthy();
 
-    const payload = await jwtService.verifyAsync(accessToken);
+    const payload =
+      await jwtService.verifyAsync(accessToken);
 
     expect(payload.sub).toBe(userId);
-    expect(payload.sid).toBe(sessionResult.sessionId);
+    expect(payload.sid).toBe(
+      sessionResult.sessionId,
+    );
 
     expect(payload.exp).toBeTypeOf('number');
     expect(payload.iat).toBeTypeOf('number');
 
-    expect(payload.exp).toBeGreaterThan(payload.iat);
+    expect(payload.exp).toBeGreaterThan(
+      payload.iat,
+    );
 
-    const lifetimeSeconds = payload.exp - payload.iat;
+    const lifetimeSeconds =
+      payload.exp - payload.iat;
 
     expect(lifetimeSeconds).toBe(15 * 60);
   });
 
   it('rotates the refresh token and creates a new session', async () => {
-    const oldSession = await authService.createSession(
-      userId,
-      'rotation-test-device',
-    );
+    const oldSession =
+      await authService.createSession(
+        userId,
+        'rotation-test-device',
+      );
 
     const rotationResult =
       await authService.rotateRefreshToken(
@@ -207,8 +235,12 @@ describe('AuthService - Session and Access Token', () => {
       });
 
     expect(oldSessionFromDatabase).not.toBeNull();
-    expect(oldSessionFromDatabase?.revokedAt).not.toBeNull();
-    expect(oldSessionFromDatabase?.familyId).toBeTruthy();
+    expect(
+      oldSessionFromDatabase?.revokedAt,
+    ).not.toBeNull();
+    expect(
+      oldSessionFromDatabase?.familyId,
+    ).toBeTruthy();
 
     const newSessionFromDatabase =
       await prisma.session.findUnique({
@@ -219,33 +251,39 @@ describe('AuthService - Session and Access Token', () => {
 
     expect(newSessionFromDatabase).not.toBeNull();
 
-    expect(newSessionFromDatabase?.userId).toBe(userId);
-
-    expect(newSessionFromDatabase?.deviceId).toBe(
-      'rotation-test-device',
+    expect(newSessionFromDatabase?.userId).toBe(
+      userId,
     );
 
-    expect(newSessionFromDatabase?.familyId).toBe(
-      oldSessionFromDatabase?.familyId,
-    );
+    expect(
+      newSessionFromDatabase?.deviceId,
+    ).toBe('rotation-test-device');
 
-    expect(newSessionFromDatabase?.revokedAt).toBeNull();
+    expect(
+      newSessionFromDatabase?.familyId,
+    ).toBe(oldSessionFromDatabase?.familyId);
 
-    const expectedNewHash = createHash('sha256')
-      .update(rotationResult.refreshToken)
-      .digest('hex');
+    expect(
+      newSessionFromDatabase?.revokedAt,
+    ).toBeNull();
 
-    expect(newSessionFromDatabase?.refreshTokenHash).toBe(
-      expectedNewHash,
-    );
+    const expectedNewHash =
+      createHash('sha256')
+        .update(rotationResult.refreshToken)
+        .digest('hex');
 
-    expect(newSessionFromDatabase?.refreshTokenHash).not.toBe(
-      rotationResult.refreshToken,
-    );
+    expect(
+      newSessionFromDatabase?.refreshTokenHash,
+    ).toBe(expectedNewHash);
+
+    expect(
+      newSessionFromDatabase?.refreshTokenHash,
+    ).not.toBe(rotationResult.refreshToken);
   });
 
   it('rejects the old refresh token after rotation', async () => {
-    const oldSession = await authService.createSession(userId);
+    const oldSession =
+      await authService.createSession(userId);
 
     const rotationResult =
       await authService.rotateRefreshToken(
@@ -274,7 +312,8 @@ describe('AuthService - Session and Access Token', () => {
   });
 
   it('creates an access token for the new session after rotation', async () => {
-    const oldSession = await authService.createSession(userId);
+    const oldSession =
+      await authService.createSession(userId);
 
     const rotationResult =
       await authService.rotateRefreshToken(
@@ -282,9 +321,10 @@ describe('AuthService - Session and Access Token', () => {
         oldSession.refreshToken,
       );
 
-    const payload = await jwtService.verifyAsync(
-      rotationResult.accessToken,
-    );
+    const payload =
+      await jwtService.verifyAsync(
+        rotationResult.accessToken,
+      );
 
     expect(payload.sub).toBe(userId);
 
@@ -295,16 +335,17 @@ describe('AuthService - Session and Access Token', () => {
     expect(payload.exp).toBeTypeOf('number');
     expect(payload.iat).toBeTypeOf('number');
 
-    expect(payload.exp - payload.iat).toBe(
-      15 * 60,
-    );
+    expect(
+      payload.exp - payload.iat,
+    ).toBe(15 * 60);
   });
 
   it('keeps the same session family when rotating a refresh token', async () => {
-    const oldSession = await authService.createSession(
-      userId,
-      'family-test-device',
-    );
+    const oldSession =
+      await authService.createSession(
+        userId,
+        'family-test-device',
+      );
 
     const oldSessionFromDatabase =
       await prisma.session.findUnique({
@@ -314,7 +355,10 @@ describe('AuthService - Session and Access Token', () => {
       });
 
     expect(oldSessionFromDatabase).not.toBeNull();
-    expect(oldSessionFromDatabase?.familyId).toBeTruthy();
+
+    expect(
+      oldSessionFromDatabase?.familyId,
+    ).toBeTruthy();
 
     const rotationResult =
       await authService.rotateRefreshToken(
@@ -331,16 +375,17 @@ describe('AuthService - Session and Access Token', () => {
 
     expect(newSessionFromDatabase).not.toBeNull();
 
-    expect(newSessionFromDatabase?.familyId).toBe(
-      oldSessionFromDatabase?.familyId,
-    );
+    expect(
+      newSessionFromDatabase?.familyId,
+    ).toBe(oldSessionFromDatabase?.familyId);
   });
 
   it('allows only one concurrent refresh using the same refresh token', async () => {
-    const oldSession = await authService.createSession(
-      userId,
-      'concurrent-refresh-device',
-    );
+    const oldSession =
+      await authService.createSession(
+        userId,
+        'concurrent-refresh-device',
+      );
 
     const originalSession =
       await prisma.session.findUnique({
@@ -351,52 +396,189 @@ describe('AuthService - Session and Access Token', () => {
 
     expect(originalSession).not.toBeNull();
 
-    const familyId = originalSession!.familyId;
+    const familyId =
+      originalSession!.familyId;
 
-    const results = await Promise.allSettled([
-      authService.rotateRefreshToken(
-        oldSession.sessionId,
-        oldSession.refreshToken,
-      ),
-      authService.rotateRefreshToken(
-        oldSession.sessionId,
-        oldSession.refreshToken,
-      ),
-    ]);
+    /*
+     * The service already uses a PostgreSQL advisory
+     * transaction lock for the refresh session.
+     *
+     * The old test used Promise.allSettled() directly,
+     * which did NOT guarantee that the second request
+     * actually arrived while the first transaction still
+     * held the lock.
+     *
+     * We temporarily wrap the private lock method in this
+     * test so the first request deliberately holds the
+     * lock until the second request has started.
+     *
+     * This makes the concurrency test deterministic.
+     */
 
-    const successful = results.filter(
-      ({ status }) => status === 'fulfilled',
-    );
+    type RefreshLockMethod = (
+      tx: unknown,
+      sessionId: string,
+    ) => Promise<boolean>;
 
-    const rejected = results.filter(
-      ({ status }) => status === 'rejected',
-    );
+    const serviceWithPrivateAccess =
+      authService as unknown as {
+        tryLockRefreshSession: RefreshLockMethod;
+      };
 
-    expect(successful).toHaveLength(1);
-    expect(rejected).toHaveLength(1);
+    const originalTryLock =
+      serviceWithPrivateAccess.tryLockRefreshSession;
 
-    const familySessions =
-      await prisma.session.findMany({
-        where: {
-          familyId,
-        },
+    let firstLockAcquired = false;
+
+    let signalFirstLockAcquired!: () => void;
+
+    const firstLockAcquiredPromise =
+      new Promise<void>((resolve) => {
+        signalFirstLockAcquired = resolve;
       });
 
-    const activeFamilySessions =
-      familySessions.filter(
-        (session) => session.revokedAt === null,
+    let releaseFirstLock!: () => void;
+
+    const releaseFirstLockPromise =
+      new Promise<void>((resolve) => {
+        releaseFirstLock = resolve;
+      });
+
+    let invocationCount = 0;
+
+    serviceWithPrivateAccess.tryLockRefreshSession =
+      async (tx, sessionId) => {
+        const locked =
+          await originalTryLock.call(
+            authService,
+            tx,
+            sessionId,
+          );
+
+        if (
+          locked &&
+          invocationCount === 0
+        ) {
+          invocationCount += 1;
+          firstLockAcquired = true;
+
+          signalFirstLockAcquired();
+
+          await releaseFirstLockPromise;
+        } else {
+          invocationCount += 1;
+        }
+
+        return locked;
+      };
+
+    try {
+      /*
+       * Start the first refresh.
+       *
+       * It will acquire the real PostgreSQL advisory
+       * lock and then pause while keeping the transaction
+       * open.
+       */
+      const firstRefresh =
+        authService.rotateRefreshToken(
+          oldSession.sessionId,
+          oldSession.refreshToken,
+        );
+
+      /*
+       * Wait until the first request actually owns
+       * the database lock.
+       */
+      await firstLockAcquiredPromise;
+
+      expect(firstLockAcquired).toBe(true);
+
+      /*
+       * Start the second refresh only after the first
+       * request is definitely holding the lock.
+       *
+       * The second request must therefore fail because
+       * tryLockRefreshSession() returns false.
+       */
+      const secondRefresh =
+        authService.rotateRefreshToken(
+          oldSession.sessionId,
+          oldSession.refreshToken,
+        );
+
+      /*
+       * Give the second request a chance to reach the
+       * lock attempt before allowing the first request
+       * to continue.
+       */
+      await new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
+
+      /*
+       * Release the first request.
+       */
+      releaseFirstLock();
+
+      const results =
+        await Promise.allSettled([
+          firstRefresh,
+          secondRefresh,
+        ]);
+
+      const successful =
+        results.filter(
+          ({ status }) =>
+            status === 'fulfilled',
+        );
+
+      const rejected =
+        results.filter(
+          ({ status }) =>
+            status === 'rejected',
+        );
+
+      expect(successful).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
+
+      const familySessions =
+        await prisma.session.findMany({
+          where: {
+            familyId,
+          },
+        });
+
+      const activeFamilySessions =
+        familySessions.filter(
+          (session) =>
+            session.revokedAt === null,
+        );
+
+      expect(activeFamilySessions).toHaveLength(
+        1,
       );
 
-    expect(activeFamilySessions).toHaveLength(1);
+      expect(familySessions).toHaveLength(2);
+    } finally {
+      /*
+       * Always release the first request in case the
+       * assertions above fail, otherwise the PostgreSQL
+       * transaction can remain open until timeout.
+       */
+      releaseFirstLock();
 
-    expect(familySessions).toHaveLength(2);
+      serviceWithPrivateAccess.tryLockRefreshSession =
+        originalTryLock;
+    }
   });
 
   it('revokes the entire session family when a rotated refresh token is replayed', async () => {
-    const oldSession = await authService.createSession(
-      userId,
-      'replay-test-device',
-    );
+    const oldSession =
+      await authService.createSession(
+        userId,
+        'replay-test-device',
+      );
 
     const firstRotation =
       await authService.rotateRefreshToken(
@@ -421,9 +603,9 @@ describe('AuthService - Session and Access Token', () => {
     expect(oldSessionFromDatabase).not.toBeNull();
     expect(newSessionFromDatabase).not.toBeNull();
 
-    expect(newSessionFromDatabase?.familyId).toBe(
-      oldSessionFromDatabase?.familyId,
-    );
+    expect(
+      newSessionFromDatabase?.familyId,
+    ).toBe(oldSessionFromDatabase?.familyId);
 
     const familyId =
       newSessionFromDatabase!.familyId;
@@ -446,13 +628,15 @@ describe('AuthService - Session and Access Token', () => {
 
     expect(
       familySessions.every(
-        (session) => session.revokedAt !== null,
+        (session) =>
+          session.revokedAt !== null,
       ),
     ).toBe(true);
   });
 
   it('authenticates a new email identifier and creates a session', async () => {
-    const email = `otp-auth-email-${Date.now()}@makook.local`;
+    const email =
+      `otp-auth-email-${Date.now()}@makook.local`;
 
     const { user, code } =
       await requestOtpAndGetCode(
@@ -470,11 +654,12 @@ describe('AuthService - Session and Access Token', () => {
         'email-device',
       );
 
-    const session = await prisma.session.findUnique({
-      where: {
-        id: result.sessionId,
-      },
-    });
+    const session =
+      await prisma.session.findUnique({
+        where: {
+          id: result.sessionId,
+        },
+      });
 
     const authenticatedUser =
       await prisma.user.findUnique({
@@ -483,35 +668,43 @@ describe('AuthService - Session and Access Token', () => {
         },
       });
 
-    const payload = await jwtService.verifyAsync(
-      result.accessToken,
-    );
+    const payload =
+      await jwtService.verifyAsync(
+        result.accessToken,
+      );
 
     expect(
       authenticatedUser?.emailVerifiedAt,
     ).not.toBeNull();
 
     expect(session?.userId).toBe(user.id);
-    expect(session?.deviceId).toBe('email-device');
+    expect(session?.deviceId).toBe(
+      'email-device',
+    );
 
-    expect(session?.refreshTokenHash).toBe(
+    expect(
+      session?.refreshTokenHash,
+    ).toBe(
       createHash('sha256')
         .update(result.refreshToken)
         .digest('hex'),
     );
 
-    expect(session?.refreshTokenHash).not.toBe(
-      result.refreshToken,
-    );
+    expect(
+      session?.refreshTokenHash,
+    ).not.toBe(result.refreshToken);
 
     expect(payload.sub).toBe(user.id);
-    expect(payload.sid).toBe(result.sessionId);
+    expect(payload.sid).toBe(
+      result.sessionId,
+    );
   });
 
   it('authenticates a new phone identifier', async () => {
-    const phone = `+201${Date.now()
-      .toString()
-      .slice(-10)}`;
+    const phone =
+      `+201${Date.now()
+        .toString()
+        .slice(-10)}`;
 
     const { user, code } =
       await requestOtpAndGetCode(
@@ -541,7 +734,8 @@ describe('AuthService - Session and Access Token', () => {
   });
 
   it('authenticates an existing active user without replacing verification time', async () => {
-    const email = `otp-auth-verified-${Date.now()}@makook.local`;
+    const email =
+      `otp-auth-verified-${Date.now()}@makook.local`;
 
     const verifiedAt = new Date(
       '2026-01-01T00:00:00.000Z',
@@ -590,9 +784,10 @@ describe('AuthService - Session and Access Token', () => {
     const email =
       `otp-auth-normalized-${Date.now()}@makook.local`;
 
-    const phone = `+201${Date.now()
-      .toString()
-      .slice(-10)}`;
+    const phone =
+      `+201${Date.now()
+        .toString()
+        .slice(-10)}`;
 
     const emailUser =
       await identityService.createUser({
@@ -665,10 +860,11 @@ describe('AuthService - Session and Access Token', () => {
 
       createdUserIds.push(user.id);
 
-      const code = await otpService.createCode(
-        user.id,
-        VerificationCodeType.EMAIL,
-      );
+      const code =
+        await otpService.createCode(
+          user.id,
+          VerificationCodeType.EMAIL,
+        );
 
       await expect(
         authService.authenticateWithOtp(
@@ -726,7 +922,9 @@ describe('AuthService - Session and Access Token', () => {
         usedAt: null,
       },
       data: {
-        expiresAt: new Date(Date.now() - 1),
+        expiresAt: new Date(
+          Date.now() - 1,
+        ),
       },
     });
 
@@ -773,7 +971,11 @@ describe('AuthService - Session and Access Token', () => {
         email,
       );
 
-    for (let attempt = 0; attempt < 5; attempt++) {
+    for (
+      let attempt = 0;
+      attempt < 5;
+      attempt++
+    ) {
       await expect(
         authService.authenticateWithOtp(
           VerificationCodeType.EMAIL,
@@ -806,22 +1008,24 @@ describe('AuthService - Session and Access Token', () => {
         email,
       );
 
-    const results = await Promise.allSettled([
-      authService.authenticateWithOtp(
-        VerificationCodeType.EMAIL,
-        email,
-        code,
-      ),
-      authService.authenticateWithOtp(
-        VerificationCodeType.EMAIL,
-        email,
-        code,
-      ),
-    ]);
+    const results =
+      await Promise.allSettled([
+        authService.authenticateWithOtp(
+          VerificationCodeType.EMAIL,
+          email,
+          code,
+        ),
+        authService.authenticateWithOtp(
+          VerificationCodeType.EMAIL,
+          email,
+          code,
+        ),
+      ]);
 
     expect(
       results.filter(
-        ({ status }) => status === 'fulfilled',
+        ({ status }) =>
+          status === 'fulfilled',
       ),
     ).toHaveLength(1);
 

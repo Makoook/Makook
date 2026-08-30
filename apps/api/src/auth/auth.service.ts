@@ -45,6 +45,16 @@ export class AuthService {
     );
   }
 
+  /**
+   * Attempts to acquire a transaction-scoped lock
+   * for one refresh session.
+   *
+   * If another request is already processing the same
+   * session, the second request fails immediately.
+   *
+   * This prevents two concurrent requests using the
+   * same refresh token from both rotating it.
+   */
   private async tryLockRefreshSession(
     tx: Prisma.TransactionClient,
     sessionId: string,
@@ -63,6 +73,10 @@ export class AuthService {
     return result[0]?.locked === true;
   }
 
+  /**
+   * Serializes operations belonging to the same
+   * refresh-token family.
+   */
   private async lockSessionFamily(
     tx: Prisma.TransactionClient,
     familyId: string,
@@ -213,11 +227,12 @@ export class AuthService {
       await this.prisma.$transaction(
         async (tx) => {
           /*
-           * Do not wait for another refresh request
-           * using the same session.
+           * STEP 1
            *
-           * If another request currently owns this
-           * lock, this is a concurrent refresh attempt.
+           * Try to lock this exact refresh session.
+           *
+           * If another request is currently refreshing
+           * this same session, do not wait for it.
            */
           const lockAcquired =
             await this.tryLockRefreshSession(
@@ -231,6 +246,11 @@ export class AuthService {
             );
           }
 
+          /*
+           * STEP 2
+           *
+           * Load the session.
+           */
           const session =
             await tx.session.findUnique({
               where: {
@@ -245,10 +265,9 @@ export class AuthService {
           }
 
           /*
-           * Lock the complete session family.
+           * STEP 3
            *
-           * This protects family-wide replay
-           * revocation.
+           * Lock the session family.
            */
           await this.lockSessionFamily(
             tx,
@@ -256,7 +275,10 @@ export class AuthService {
           );
 
           /*
-           * Re-read after acquiring the family lock.
+           * STEP 4
+           *
+           * Re-read the session after acquiring
+           * the family lock.
            */
           const currentSession =
             await tx.session.findUnique({
@@ -265,8 +287,18 @@ export class AuthService {
               },
             });
 
+          if (!currentSession) {
+            throw new UnauthorizedException(
+              'Invalid session',
+            );
+          }
+
+          /*
+           * STEP 5
+           *
+           * Check expiration.
+           */
           if (
-            !currentSession ||
             currentSession.expiresAt <= new Date()
           ) {
             throw new UnauthorizedException(
@@ -280,19 +312,10 @@ export class AuthService {
             );
 
           /*
-           * REPLAY DETECTION
+           * STEP 6
            *
-           * The session is already revoked and the
-           * presented token matches the original token.
-           *
-           * This is a genuine refresh-token replay.
-           *
-           * Revoke EVERY session in the family,
-           * including sessions already revoked.
-           *
-           * We return "replay" instead of throwing here,
-           * because throwing inside the transaction would
-           * rollback the family revocation.
+           * If the session is already revoked, determine
+           * whether this is a real refresh-token replay.
            */
           if (currentSession.revokedAt) {
             const isReplay =
@@ -302,16 +325,32 @@ export class AuthService {
               );
 
             if (isReplay) {
+              /*
+               * IMPORTANT:
+               *
+               * Do NOT throw here.
+               *
+               * Throwing inside the Prisma transaction
+               * would rollback this updateMany().
+               *
+               * We need the family revocation to COMMIT first.
+               */
               await tx.session.updateMany({
                 where: {
                   familyId:
                     currentSession.familyId,
+                  revokedAt: null,
                 },
                 data: {
                   revokedAt: new Date(),
                 },
               });
 
+              /*
+               * Return a replay marker.
+               *
+               * The transaction will now commit.
+               */
               return {
                 kind: 'replay' as const,
               };
@@ -323,7 +362,10 @@ export class AuthService {
           }
 
           /*
-           * Active session but incorrect token.
+           * STEP 7
+           *
+           * Verify that the supplied refresh token belongs
+           * to this active session.
            */
           if (
             !this.hashesMatch(
@@ -337,22 +379,23 @@ export class AuthService {
           }
 
           /*
-           * Revoke the current session.
+           * STEP 8
+           *
+           * Revoke the old session.
            */
-          const revokedAt = new Date();
-
           await tx.session.update({
             where: {
               id: currentSession.id,
             },
             data: {
-              revokedAt,
+              revokedAt: new Date(),
             },
           });
 
           /*
-           * Create the replacement session in the
-           * SAME session family.
+           * STEP 9
+           *
+           * Create the new session using the SAME familyId.
            */
           const newSession =
             await tx.session.create({
@@ -374,27 +417,36 @@ export class AuthService {
             kind: 'success' as const,
             userId:
               currentSession.userId,
-            sessionId: newSession.id,
-            refreshToken: newRefreshToken,
+            sessionId:
+              newSession.id,
           };
         },
       );
 
     /*
-     * The transaction has already committed here.
+     * IMPORTANT:
      *
-     * Therefore, if this was a replay, the family
-     * revocation has already been permanently saved.
+     * These errors are intentionally thrown AFTER
+     * the transaction has completed.
+     *
+     * Therefore a replay can revoke the entire family
+     * and the revocation remains committed.
      */
-    if (
-      result.kind === 'replay' ||
-      result.kind === 'invalid'
-    ) {
+    if (result.kind === 'replay') {
       throw new UnauthorizedException(
         'Invalid refresh token',
       );
     }
 
+    if (result.kind === 'invalid') {
+      throw new UnauthorizedException(
+        'Invalid refresh token',
+      );
+    }
+
+    /*
+     * Only a successful rotation reaches this point.
+     */
     const accessToken =
       await this.createAccessToken(
         result.userId,
@@ -402,8 +454,10 @@ export class AuthService {
       );
 
     return {
-      sessionId: result.sessionId,
-      refreshToken: result.refreshToken,
+      sessionId:
+        result.sessionId,
+      refreshToken:
+        newRefreshToken,
       accessToken,
     };
   }
