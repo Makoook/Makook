@@ -46,31 +46,25 @@ export class AuthService {
   }
 
   /**
-   * Attempts to acquire a transaction-scoped lock
-   * for one refresh session.
+   * Serializes refresh operations for one session.
    *
-   * If another request is already processing the same
-   * session, the second request fails immediately.
-   *
-   * This prevents two concurrent requests using the
-   * same refresh token from both rotating it.
+   * This is a blocking transaction-scoped advisory lock.
+   * A concurrent request using the same refresh session
+   * waits for the first transaction to finish and then
+   * re-checks the session state.
    */
-  private async tryLockRefreshSession(
+  private async lockRefreshSession(
     tx: Prisma.TransactionClient,
     sessionId: string,
-  ): Promise<boolean> {
-    const result = await tx.$queryRaw<
-      Array<{ locked: boolean }>
-    >`
-      SELECT pg_try_advisory_xact_lock(
+  ): Promise<void> {
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(
         hashtextextended(
           ${`refresh-session:${sessionId}`},
           0
         )
-      ) AS locked
+      )
     `;
-
-    return result[0]?.locked === true;
   }
 
   /**
@@ -223,28 +217,33 @@ export class AuthService {
       newExpiresAt.getDate() + 30,
     );
 
+    const graceSeconds =
+      Number.parseInt(
+        process.env.REFRESH_TOKEN_GRACE_SECONDS ??
+          '5',
+        10,
+      );
+
+    const refreshGraceWindowMs =
+      Number.isFinite(graceSeconds) &&
+      graceSeconds > 0
+        ? graceSeconds * 1000
+        : 5000;
+
     const result =
       await this.prisma.$transaction(
         async (tx) => {
           /*
            * STEP 1
            *
-           * Try to lock this exact refresh session.
-           *
-           * If another request is currently refreshing
-           * this same session, do not wait for it.
+           * Serialize refresh operations for this exact
+           * session. A concurrent request waits for the
+           * first transaction to finish.
            */
-          const lockAcquired =
-            await this.tryLockRefreshSession(
-              tx,
-              sessionId,
-            );
-
-          if (!lockAcquired) {
-            throw new UnauthorizedException(
-              'Invalid refresh token',
-            );
-          }
+          await this.lockRefreshSession(
+            tx,
+            sessionId,
+          );
 
           /*
            * STEP 2
@@ -267,7 +266,7 @@ export class AuthService {
           /*
            * STEP 3
            *
-           * Lock the session family.
+           * Serialize operations for the entire family.
            */
           await this.lockSessionFamily(
             tx,
@@ -277,8 +276,8 @@ export class AuthService {
           /*
            * STEP 4
            *
-           * Re-read the session after acquiring
-           * the family lock.
+           * Re-read the session after both locks have
+           * been acquired.
            */
           const currentSession =
             await tx.session.findUnique({
@@ -314,58 +313,104 @@ export class AuthService {
           /*
            * STEP 6
            *
-           * If the session is already revoked, determine
-           * whether this is a real refresh-token replay.
+           * The session is already revoked.
+           *
+           * There are two possible cases:
+           *
+           * A) This session was legitimately rotated and
+           *    the old token is being retried during the
+           *    short grace window.
+           *
+           * B) The old token is being replayed outside the
+           *    grace window.
+           *
+           * The replacement relationship tells us whether
+           * this session was actually rotated.
            */
           if (currentSession.revokedAt) {
-            const isReplay =
+            const tokenMatches =
               this.hashesMatch(
                 refreshTokenHash,
                 currentSession.refreshTokenHash,
               );
 
-            if (isReplay) {
-              /*
-               * IMPORTANT:
-               *
-               * Do NOT throw here.
-               *
-               * Throwing inside the Prisma transaction
-               * would rollback this updateMany().
-               *
-               * We need the family revocation to COMMIT first.
-               */
-              await tx.session.updateMany({
-                where: {
-                  familyId:
-                    currentSession.familyId,
-                  revokedAt: null,
-                },
-                data: {
-                  revokedAt: new Date(),
-                },
-              });
-
-              /*
-               * Return a replay marker.
-               *
-               * The transaction will now commit.
-               */
+            if (!tokenMatches) {
               return {
-                kind: 'replay' as const,
+                kind: 'invalid' as const,
               };
             }
 
+            /*
+             * Only a session that has a known replacement
+             * can enter the grace path.
+             */
+            if (
+              currentSession.replacedBySessionId
+            ) {
+              const graceDeadline =
+                currentSession.revokedAt.getTime() +
+                refreshGraceWindowMs;
+
+              const graceStillValid =
+                Date.now() <= graceDeadline;
+
+              if (
+                graceStillValid &&
+                !currentSession.graceConsumedAt
+              ) {
+                /*
+                 * Consume the grace exactly once.
+                 *
+                 * We intentionally do NOT return the new
+                 * refresh token here. The plaintext token
+                 * exists only in the original successful
+                 * response and is never stored in the DB.
+                 */
+                await tx.session.update({
+                  where: {
+                    id: currentSession.id,
+                  },
+                  data: {
+                    graceConsumedAt:
+                      new Date(),
+                  },
+                });
+
+                return {
+                  kind: 'grace' as const,
+                };
+              }
+            }
+
+            /*
+             * The old token is now a genuine replay.
+             *
+             * Revoke every still-active session in the
+             * family. This operation remains inside the
+             * transaction and therefore commits together
+             * with the replay marker.
+             */
+            await tx.session.updateMany({
+              where: {
+                familyId:
+                  currentSession.familyId,
+                revokedAt: null,
+              },
+              data: {
+                revokedAt: new Date(),
+              },
+            });
+
             return {
-              kind: 'invalid' as const,
+              kind: 'replay' as const,
             };
           }
 
           /*
            * STEP 7
            *
-           * Verify that the supplied refresh token belongs
-           * to this active session.
+           * The session is active. Verify that the supplied
+           * refresh token belongs to this session.
            */
           if (
             !this.hashesMatch(
@@ -381,21 +426,26 @@ export class AuthService {
           /*
            * STEP 8
            *
-           * Revoke the old session.
+           * Revoke the old session and create its
+           * replacement as one atomic transaction.
            */
-          await tx.session.update({
-            where: {
-              id: currentSession.id,
-            },
-            data: {
-              revokedAt: new Date(),
-            },
-          });
+          const revokedAt = new Date();
+
+          const revokedSession =
+            await tx.session.update({
+              where: {
+                id: currentSession.id,
+              },
+              data: {
+                revokedAt,
+              },
+            });
 
           /*
            * STEP 9
            *
-           * Create the new session using the SAME familyId.
+           * Create the replacement session in the same
+           * refresh-token family.
            */
           const newSession =
             await tx.session.create({
@@ -413,6 +463,25 @@ export class AuthService {
               },
             });
 
+          /*
+           * STEP 10
+           *
+           * Link the old session to the exact replacement.
+           *
+           * This relationship is what distinguishes a
+           * rotated session from an independently revoked
+           * session.
+           */
+          await tx.session.update({
+            where: {
+              id: revokedSession.id,
+            },
+            data: {
+              replacedBySessionId:
+                newSession.id,
+            },
+          });
+
           return {
             kind: 'success' as const,
             userId:
@@ -424,29 +493,22 @@ export class AuthService {
       );
 
     /*
-     * IMPORTANT:
+     * The transaction has completed at this point.
      *
-     * These errors are intentionally thrown AFTER
-     * the transaction has completed.
-     *
-     * Therefore a replay can revoke the entire family
-     * and the revocation remains committed.
+     * Replay/invalid/grace failures are therefore thrown
+     * after the transaction so database changes such as
+     * family revocation or grace consumption are committed.
      */
-    if (result.kind === 'replay') {
+    if (
+      result.kind === 'replay' ||
+      result.kind === 'invalid' ||
+      result.kind === 'grace'
+    ) {
       throw new UnauthorizedException(
         'Invalid refresh token',
       );
     }
 
-    if (result.kind === 'invalid') {
-      throw new UnauthorizedException(
-        'Invalid refresh token',
-      );
-    }
-
-    /*
-     * Only a successful rotation reaches this point.
-     */
     const accessToken =
       await this.createAccessToken(
         result.userId,

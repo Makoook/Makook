@@ -380,200 +380,77 @@ describe('AuthService - Session and Access Token', () => {
     ).toBe(oldSessionFromDatabase?.familyId);
   });
 
-  it('allows only one concurrent refresh using the same refresh token', async () => {
+  it('does not revoke the session family when the same refresh token is retried during the grace window', async () => {
     const oldSession =
       await authService.createSession(
         userId,
         'concurrent-refresh-device',
       );
 
-    const originalSession =
-      await prisma.session.findUnique({
+    const firstRotation =
+      await authService.rotateRefreshToken(
+        oldSession.sessionId,
+        oldSession.refreshToken,
+      );
+
+    await expect(
+      authService.rotateRefreshToken(
+        oldSession.sessionId,
+        oldSession.refreshToken,
+      ),
+    ).rejects.toThrow('Invalid refresh token');
+
+    const familyId =
+      (
+        await prisma.session.findUnique({
+          where: {
+            id: oldSession.sessionId,
+          },
+        })
+      )!.familyId;
+
+    const familySessions =
+      await prisma.session.findMany({
         where: {
-          id: oldSession.sessionId,
+          familyId,
         },
       });
 
-    expect(originalSession).not.toBeNull();
+    expect(familySessions).toHaveLength(2);
 
-    const familyId =
-      originalSession!.familyId;
-
-    /*
-     * The service already uses a PostgreSQL advisory
-     * transaction lock for the refresh session.
-     *
-     * The old test used Promise.allSettled() directly,
-     * which did NOT guarantee that the second request
-     * actually arrived while the first transaction still
-     * held the lock.
-     *
-     * We temporarily wrap the private lock method in this
-     * test so the first request deliberately holds the
-     * lock until the second request has started.
-     *
-     * This makes the concurrency test deterministic.
-     */
-
-    type RefreshLockMethod = (
-      tx: unknown,
-      sessionId: string,
-    ) => Promise<boolean>;
-
-    const serviceWithPrivateAccess =
-      authService as unknown as {
-        tryLockRefreshSession: RefreshLockMethod;
-      };
-
-    const originalTryLock =
-      serviceWithPrivateAccess.tryLockRefreshSession;
-
-    let firstLockAcquired = false;
-
-    let signalFirstLockAcquired!: () => void;
-
-    const firstLockAcquiredPromise =
-      new Promise<void>((resolve) => {
-        signalFirstLockAcquired = resolve;
-      });
-
-    let releaseFirstLock!: () => void;
-
-    const releaseFirstLockPromise =
-      new Promise<void>((resolve) => {
-        releaseFirstLock = resolve;
-      });
-
-    let invocationCount = 0;
-
-    serviceWithPrivateAccess.tryLockRefreshSession =
-      async (tx, sessionId) => {
-        const locked =
-          await originalTryLock.call(
-            authService,
-            tx,
-            sessionId,
-          );
-
-        if (
-          locked &&
-          invocationCount === 0
-        ) {
-          invocationCount += 1;
-          firstLockAcquired = true;
-
-          signalFirstLockAcquired();
-
-          await releaseFirstLockPromise;
-        } else {
-          invocationCount += 1;
-        }
-
-        return locked;
-      };
-
-    try {
-      /*
-       * Start the first refresh.
-       *
-       * It will acquire the real PostgreSQL advisory
-       * lock and then pause while keeping the transaction
-       * open.
-       */
-      const firstRefresh =
-        authService.rotateRefreshToken(
-          oldSession.sessionId,
-          oldSession.refreshToken,
-        );
-
-      /*
-       * Wait until the first request actually owns
-       * the database lock.
-       */
-      await firstLockAcquiredPromise;
-
-      expect(firstLockAcquired).toBe(true);
-
-      /*
-       * Start the second refresh only after the first
-       * request is definitely holding the lock.
-       *
-       * The second request must therefore fail because
-       * tryLockRefreshSession() returns false.
-       */
-      const secondRefresh =
-        authService.rotateRefreshToken(
-          oldSession.sessionId,
-          oldSession.refreshToken,
-        );
-
-      /*
-       * Give the second request a chance to reach the
-       * lock attempt before allowing the first request
-       * to continue.
-       */
-      await new Promise<void>((resolve) => {
-        setImmediate(resolve);
-      });
-
-      /*
-       * Release the first request.
-       */
-      releaseFirstLock();
-
-      const results =
-        await Promise.allSettled([
-          firstRefresh,
-          secondRefresh,
-        ]);
-
-      const successful =
-        results.filter(
-          ({ status }) =>
-            status === 'fulfilled',
-        );
-
-      const rejected =
-        results.filter(
-          ({ status }) =>
-            status === 'rejected',
-        );
-
-      expect(successful).toHaveLength(1);
-      expect(rejected).toHaveLength(1);
-
-      const familySessions =
-        await prisma.session.findMany({
-          where: {
-            familyId,
-          },
-        });
-
-      const activeFamilySessions =
-        familySessions.filter(
-          (session) =>
-            session.revokedAt === null,
-        );
-
-      expect(activeFamilySessions).toHaveLength(
-        1,
+    const oldSessionFromDatabase =
+      familySessions.find(
+        (session) =>
+          session.id === oldSession.sessionId,
       );
 
-      expect(familySessions).toHaveLength(2);
-    } finally {
-      /*
-       * Always release the first request in case the
-       * assertions above fail, otherwise the PostgreSQL
-       * transaction can remain open until timeout.
-       */
-      releaseFirstLock();
+    const replacementSession =
+      familySessions.find(
+        (session) =>
+          session.id === firstRotation.sessionId,
+      );
 
-      serviceWithPrivateAccess.tryLockRefreshSession =
-        originalTryLock;
-    }
+    expect(oldSessionFromDatabase).not.toBeNull();
+    expect(replacementSession).not.toBeNull();
+
+    expect(
+      oldSessionFromDatabase!.revokedAt,
+    ).not.toBeNull();
+
+    expect(
+      oldSessionFromDatabase!.replacedBySessionId,
+    ).toBe(replacementSession!.id);
+
+    expect(
+      oldSessionFromDatabase!.graceConsumedAt,
+    ).not.toBeNull();
+
+    expect(
+      replacementSession!.revokedAt,
+    ).toBeNull();
   });
 
-  it('revokes the entire session family when a rotated refresh token is replayed', async () => {
+  it('revokes the entire session family when a rotated refresh token is replayed after the grace window', async () => {
     const oldSession =
       await authService.createSession(
         userId,
@@ -604,11 +481,26 @@ describe('AuthService - Session and Access Token', () => {
     expect(newSessionFromDatabase).not.toBeNull();
 
     expect(
-      newSessionFromDatabase?.familyId,
-    ).toBe(oldSessionFromDatabase?.familyId);
+      oldSessionFromDatabase!.replacedBySessionId,
+    ).toBe(newSessionFromDatabase!.id);
 
-    const familyId =
-      newSessionFromDatabase!.familyId;
+    /*
+     * Force the grace period to be expired.
+     *
+     * This makes the test deterministic and avoids
+     * depending on wall-clock timing.
+     */
+    const expiredGraceTime =
+      new Date(Date.now() - 60_000);
+
+    await prisma.session.update({
+      where: {
+        id: oldSession.sessionId,
+      },
+      data: {
+        revokedAt: expiredGraceTime,
+      },
+    });
 
     await expect(
       authService.rotateRefreshToken(
@@ -617,6 +509,9 @@ describe('AuthService - Session and Access Token', () => {
       ),
     ).rejects.toThrow('Invalid refresh token');
 
+    const familyId =
+      newSessionFromDatabase!.familyId;
+
     const familySessions =
       await prisma.session.findMany({
         where: {
@@ -624,7 +519,7 @@ describe('AuthService - Session and Access Token', () => {
         },
       });
 
-    expect(familySessions.length).toBe(2);
+    expect(familySessions).toHaveLength(2);
 
     expect(
       familySessions.every(

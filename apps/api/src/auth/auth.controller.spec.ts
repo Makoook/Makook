@@ -1,5 +1,6 @@
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
+import { JwtService } from '@nestjs/jwt';
 import request from 'supertest';
 import {
   afterAll,
@@ -267,4 +268,129 @@ describe('AuthController - Refresh Endpoint', () => {
       return refreshToken;
     });
   }
+});
+
+describe('AuthController - Logout Endpoint', () => {
+  let app: INestApplication;
+  let prisma: PrismaService;
+  let jwtService: JwtService;
+  let userId: string;
+
+  beforeAll(async () => {
+    const moduleRef = await Test.createTestingModule({
+      imports: [AuthModule],
+    }).compile();
+
+    app = moduleRef.createNestApplication();
+
+    app.useGlobalPipes(
+      new ValidationPipe({
+        whitelist: true,
+        forbidNonWhitelisted: true,
+        transform: true,
+      }),
+    );
+
+    await app.init();
+
+    prisma = app.get(PrismaService);
+    jwtService = app.get(JwtService);
+
+    const user = await prisma.user.create({
+      data: {
+        email: `auth-logout-test-${Date.now()}@makook.local`,
+      },
+    });
+
+    userId = user.id;
+  });
+
+  afterAll(async () => {
+    if (userId) {
+      await prisma.session.deleteMany({
+        where: {
+          userId,
+        },
+      });
+
+      await prisma.user.delete({
+        where: {
+          id: userId,
+        },
+      });
+    }
+
+    await app.close();
+  });
+
+  async function createActiveSession() {
+    return prisma.session.create({
+      data: {
+        userId,
+        familyId: userId,
+        refreshTokenHash: 'not-checked-by-logout',
+        expiresAt: new Date(
+          Date.now() + 30 * 24 * 60 * 60 * 1000,
+        ),
+      },
+    });
+  }
+
+  it('rejects a logout request with no access token', async () => {
+    await request(app.getHttpServer())
+      .post('/auth/logout')
+      .expect(401);
+  });
+
+  it('rejects a logout request with a malformed access token', async () => {
+    await request(app.getHttpServer())
+      .post('/auth/logout')
+      .set('Authorization', 'Bearer not-a-real-token')
+      .expect(401);
+  });
+
+  it('revokes the session named in the caller\'s own access token', async () => {
+    const session = await createActiveSession();
+
+    const accessToken = await jwtService.signAsync({
+      sub: userId,
+      sid: session.id,
+    });
+
+    await request(app.getHttpServer())
+      .post('/auth/logout')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .expect(204);
+
+    const revoked = await prisma.session.findUnique({
+      where: { id: session.id },
+    });
+
+    expect(revoked?.revokedAt).not.toBeNull();
+  });
+
+  it('is idempotent when the session is already revoked', async () => {
+    const session = await createActiveSession();
+
+    const accessToken = await jwtService.signAsync({
+      sub: userId,
+      sid: session.id,
+    });
+
+    await request(app.getHttpServer())
+      .post('/auth/logout')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .expect(204);
+
+    await request(app.getHttpServer())
+      .post('/auth/logout')
+      .set('Authorization', `Bearer ${accessToken}`)
+      .expect(204);
+
+    const revoked = await prisma.session.findUnique({
+      where: { id: session.id },
+    });
+
+    expect(revoked?.revokedAt).not.toBeNull();
+  });
 });

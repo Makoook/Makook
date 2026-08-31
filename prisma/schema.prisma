@@ -85,14 +85,20 @@ model RolePermission {
 }
 
 model Session {
-  id               String   @id @default(uuid())
+  id               String    @id @default(uuid())
   userId           String
   familyId         String
   refreshTokenHash String
   deviceId         String?
   expiresAt        DateTime
   revokedAt        DateTime?
-  createdAt        DateTime @default(now())
+  createdAt        DateTime  @default(now())
+
+  replacedBySessionId String?  @unique
+  replacedBy          Session? @relation("SessionChain", fields: [replacedBySessionId], references: [id])
+  replaces            Session? @relation("SessionChain")
+
+  graceConsumedAt DateTime?
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -102,13 +108,13 @@ model Session {
 }
 
 model Device {
-  id               String   @id @default(uuid())
+  id               String    @id @default(uuid())
   userId           String
   platform         String
   deviceIdentifier String?
   pushToken        String?
   lastSeenAt       DateTime?
-  createdAt        DateTime @default(now())
+  createdAt        DateTime  @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -116,14 +122,14 @@ model Device {
 }
 
 model VerificationCode {
-  id         String               @id @default(uuid())
-  userId     String
-  type       VerificationCodeType
-  codeHash   String
-  expiresAt  DateTime
-  usedAt     DateTime?
-  attempts   Int                  @default(0)
-  createdAt  DateTime             @default(now())
+  id        String               @id @default(uuid())
+  userId    String
+  type      VerificationCodeType
+  codeHash  String
+  expiresAt DateTime
+  usedAt    DateTime?
+  attempts  Int                  @default(0)
+  createdAt DateTime             @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
