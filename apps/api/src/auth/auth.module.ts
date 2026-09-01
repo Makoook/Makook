@@ -9,11 +9,13 @@ import { AuthService } from './auth.service.js';
 import { OtpModule } from './otp/otp.module.js';
 import { OtpController } from './otp/otp.controller.js';
 import { PrismaModule } from '../prisma/prisma.module.js';
+import { AuthorizationModule } from './authorization/authorization.module.js';
 
 @Module({
   imports: [
     PrismaModule,
     OtpModule,
+    AuthorizationModule,
     JwtModule.registerAsync({
       imports: [ConfigModule],
       inject: [ConfigService],

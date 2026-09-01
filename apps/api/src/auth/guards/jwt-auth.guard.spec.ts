@@ -3,6 +3,7 @@ import {
   UnauthorizedException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
+import { PrismaService } from '../../prisma/prisma.service.js';
 import {
   beforeEach,
   describe,
@@ -21,13 +22,26 @@ describe('JwtAuthGuard', () => {
     verifyAsync: ReturnType<typeof vi.fn>;
   };
 
+  let prisma: {
+    session: {
+      findUnique: ReturnType<typeof vi.fn>;
+    };
+  };
+
   beforeEach(() => {
     jwtService = {
       verifyAsync: vi.fn(),
     };
 
+    prisma = {
+      session: {
+        findUnique: vi.fn(),
+      },
+    };
+
     guard = new JwtAuthGuard(
       jwtService as unknown as JwtService,
+      prisma as unknown as PrismaService,
     );
   });
 
@@ -66,6 +80,13 @@ describe('JwtAuthGuard', () => {
       sid: 'session-id',
       iat: 100,
       exp: 200,
+    });
+
+    prisma.session.findUnique.mockResolvedValue({
+      id: 'session-id',
+      userId: 'user-id',
+      revokedAt: null,
+      expiresAt: new Date(Date.now() + 60_000),
     });
 
     const { context, request } = createContext(
@@ -313,4 +334,77 @@ describe('JwtAuthGuard', () => {
       UnauthorizedException,
     );
   });
+
+  it('rejects a revoked session', async () => {
+    jwtService.verifyAsync.mockResolvedValue({
+      sub: 'user-id',
+      sid: 'session-id',
+      iat: 100,
+      exp: 200,
+    });
+
+    prisma.session.findUnique.mockResolvedValue({
+      id: 'session-id',
+      userId: 'user-id',
+      revokedAt: new Date(),
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+
+    const { context } = createContext(
+      'Bearer valid-token',
+    );
+
+    await expect(
+      guard.canActivate(context),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
+  });
+
+  it('rejects an expired session', async () => {
+    jwtService.verifyAsync.mockResolvedValue({
+      sub: 'user-id',
+      sid: 'session-id',
+      iat: 100,
+      exp: 200,
+    });
+
+    prisma.session.findUnique.mockResolvedValue({
+      id: 'session-id',
+      userId: 'user-id',
+      revokedAt: null,
+      expiresAt: new Date(Date.now() - 60_000),
+    });
+
+    const { context } = createContext(
+      'Bearer valid-token',
+    );
+
+    await expect(
+      guard.canActivate(context),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
+  });
+
+  it('rejects when session user does not match token user', async () => {
+    jwtService.verifyAsync.mockResolvedValue({
+      sub: 'user-id',
+      sid: 'session-id',
+      iat: 100,
+      exp: 200,
+    });
+
+    prisma.session.findUnique.mockResolvedValue({
+      id: 'session-id',
+      userId: 'different-user',
+      revokedAt: null,
+      expiresAt: new Date(Date.now() + 60_000),
+    });
+
+    const { context } = createContext(
+      'Bearer valid-token',
+    );
+
+    await expect(
+      guard.canActivate(context),
+    ).rejects.toBeInstanceOf(UnauthorizedException);
+  });
+
 });

@@ -1,4 +1,4 @@
-import {
+﻿import {
   CanActivate,
   ExecutionContext,
   Injectable,
@@ -6,11 +6,6 @@ import {
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { PrismaService } from '../../prisma/prisma.service.js';
-
-export interface AuthenticatedPrincipal {
-  userId: string;
-  sessionId: string;
-}
 
 interface AccessTokenPayload {
   sub?: unknown;
@@ -23,11 +18,14 @@ interface AuthenticatedRequest {
   headers: {
     authorization?: string;
   };
-  user?: AuthenticatedPrincipal;
+  user?: {
+    userId: string;
+    sessionId: string;
+  };
 }
 
 @Injectable()
-export class JwtAuthGuard implements CanActivate {
+export class LogoutJwtAuthGuard implements CanActivate {
   constructor(
     private readonly jwtService: JwtService,
     private readonly prisma: PrismaService,
@@ -85,16 +83,11 @@ export class JwtAuthGuard implements CanActivate {
         select: {
           id: true,
           userId: true,
-          revokedAt: true,
           expiresAt: true,
         },
       });
 
     if (!session) {
-      throw new UnauthorizedException();
-    }
-
-    if (session.revokedAt !== null) {
       throw new UnauthorizedException();
     }
 

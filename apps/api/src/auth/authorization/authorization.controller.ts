@@ -1,0 +1,118 @@
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Patch,
+  Post,
+  UseGuards,
+} from '@nestjs/common';
+import { AuthorizationService } from './authorization.service.js';
+import { JwtAuthGuard } from '../guards/jwt-auth.guard.js';
+import { PermissionGuard } from './permission.guard.js';
+import { PERMISSIONS } from './permission.constants.js';
+import { RequirePermission } from './permission.decorator.js';
+import { CreateRoleDto } from './dto/create-role.dto.js';
+import { UpdateRoleDto } from './dto/update-role.dto.js';
+
+@Controller('authorization')
+@UseGuards(JwtAuthGuard, PermissionGuard)
+export class AuthorizationController {
+  constructor(
+    private readonly authorizationService: AuthorizationService,
+  ) {}
+
+  @Get('permissions')
+  @RequirePermission(PERMISSIONS.AUTHORIZATION_PERMISSION_READ)
+  async findPermissions() {
+    return this.authorizationService.findPermissions();
+  }
+
+  @Post('roles/:roleId/permissions/:permissionId')
+  @RequirePermission(PERMISSIONS.AUTHORIZATION_PERMISSION_ASSIGN)
+  async assignPermissionToRole(
+    @Param('roleId') roleId: string,
+    @Param('permissionId') permissionId: string,
+  ) {
+    return this.authorizationService.assignPermissionToRole(
+      roleId,
+      permissionId,
+    );
+  }
+
+  @Delete('roles/:roleId/permissions/:permissionId')
+  @RequirePermission(PERMISSIONS.AUTHORIZATION_PERMISSION_REMOVE)
+  async removePermissionFromRole(
+    @Param('roleId') roleId: string,
+    @Param('permissionId') permissionId: string,
+  ) {
+    return this.authorizationService.removePermissionFromRole(
+      roleId,
+      permissionId,
+    );
+  }
+
+  @Get('users/:userId/roles')
+  @RequirePermission(PERMISSIONS.AUTHORIZATION_ROLE_READ)
+  async findUserRoles(@Param('userId') userId: string) {
+    return this.authorizationService.findUserRoles(userId);
+  }
+
+  @Post('users/:userId/roles/:roleId')
+  @RequirePermission(PERMISSIONS.AUTHORIZATION_USER_ROLE_ASSIGN)
+  async assignRoleToUser(
+    @Param('userId') userId: string,
+    @Param('roleId') roleId: string,
+  ) {
+    return this.authorizationService.assignRoleToUser(
+      userId,
+      roleId,
+    );
+  }
+
+  @Delete('users/:userId/roles/:roleId')
+  @RequirePermission(PERMISSIONS.AUTHORIZATION_USER_ROLE_REMOVE)
+  async removeRoleFromUser(
+    @Param('userId') userId: string,
+    @Param('roleId') roleId: string,
+  ) {
+    return this.authorizationService.removeRoleFromUser(
+      userId,
+      roleId,
+    );
+  }
+
+  @Get('roles')
+  @RequirePermission(PERMISSIONS.AUTHORIZATION_ROLE_READ)
+  async findRoles() {
+    return this.authorizationService.findRoles();
+  }
+
+  @Get('roles/:id')
+  @RequirePermission(PERMISSIONS.AUTHORIZATION_ROLE_READ)
+  async findRoleById(@Param('id') id: string) {
+    return this.authorizationService.findRoleById(id);
+  }
+
+  @Post('roles')
+  @RequirePermission(PERMISSIONS.AUTHORIZATION_ROLE_CREATE)
+  async createRole(@Body() dto: CreateRoleDto) {
+    return this.authorizationService.createRole(dto);
+  }
+
+  @Patch('roles/:id')
+  @RequirePermission(PERMISSIONS.AUTHORIZATION_ROLE_UPDATE)
+  async updateRole(
+    @Param('id') id: string,
+    @Body() dto: UpdateRoleDto,
+  ) {
+    return this.authorizationService.updateRole(id, dto);
+  }
+
+  @Delete('roles/:id')
+  @RequirePermission(PERMISSIONS.AUTHORIZATION_ROLE_DELETE)
+  async deleteRole(@Param('id') id: string) {
+    return this.authorizationService.deleteRole(id);
+  }
+}

@@ -1,0 +1,286 @@
+import {
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
+import { PrismaService } from '../../prisma/prisma.service.js';
+import { Permission } from './permission.constants.js';
+import { CreateRoleDto } from './dto/create-role.dto.js';
+import { UpdateRoleDto } from './dto/update-role.dto.js';
+
+@Injectable()
+export class AuthorizationService {
+  constructor(
+    private readonly prisma: PrismaService,
+  ) {}
+
+  async assignRoleToUser(
+    userId: string,
+    roleId: string,
+  ) {
+    const [user, role] = await Promise.all([
+      this.prisma.user.findUnique({
+        where: { id: userId },
+      }),
+      this.prisma.role.findUnique({
+        where: { id: roleId },
+      }),
+    ]);
+
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    if (!role) {
+      throw new NotFoundException('Role not found');
+    }
+
+    return this.prisma.userRole.upsert({
+      where: {
+        userId_roleId: {
+          userId,
+          roleId,
+        },
+      },
+      create: {
+        userId,
+        roleId,
+      },
+      update: {},
+      include: {
+        role: true,
+        user: true,
+      },
+    });
+  }
+
+  async removeRoleFromUser(
+    userId: string,
+    roleId: string,
+  ) {
+    return this.prisma.userRole.delete({
+      where: {
+        userId_roleId: {
+          userId,
+          roleId,
+        },
+      },
+    });
+  }
+
+  async findUserRoles(userId: string) {
+    return this.prisma.userRole.findMany({
+      where: {
+        userId,
+      },
+      include: {
+        role: {
+          include: {
+            permissions: {
+              include: {
+                permission: true,
+              },
+            },
+          },
+        },
+      },
+      orderBy: {
+        role: {
+          name: 'asc',
+        },
+      },
+    });
+  }
+
+  async findPermissions() {
+    return this.prisma.permission.findMany({
+      orderBy: {
+        key: 'asc',
+      },
+    });
+  }
+
+  async assignPermissionToRole(
+    roleId: string,
+    permissionId: string,
+  ) {
+    const [role, permission] = await Promise.all([
+      this.prisma.role.findUnique({
+        where: { id: roleId },
+      }),
+      this.prisma.permission.findUnique({
+        where: { id: permissionId },
+      }),
+    ]);
+
+    if (!role) {
+      throw new NotFoundException('Role not found');
+    }
+
+    if (!permission) {
+      throw new NotFoundException('Permission not found');
+    }
+
+    return this.prisma.rolePermission.upsert({
+      where: {
+        roleId_permissionId: {
+          roleId,
+          permissionId,
+        },
+      },
+      create: {
+        roleId,
+        permissionId,
+      },
+      update: {},
+      include: {
+        permission: true,
+        role: true,
+      },
+    });
+  }
+
+  async removePermissionFromRole(
+    roleId: string,
+    permissionId: string,
+  ) {
+    return this.prisma.rolePermission.delete({
+      where: {
+        roleId_permissionId: {
+          roleId,
+          permissionId,
+        },
+      },
+    });
+  }
+
+  async findRoles() {
+    return this.prisma.role.findMany({
+      orderBy: {
+        name: 'asc',
+      },
+      include: {
+        permissions: {
+          include: {
+            permission: true,
+          },
+          orderBy: {
+            permission: {
+              key: 'asc',
+            },
+          },
+        },
+      },
+    });
+  }
+
+  async findRoleById(id: string) {
+    const role = await this.prisma.role.findUnique({
+      where: { id },
+      include: {
+        permissions: {
+          include: {
+            permission: true,
+          },
+        },
+      },
+    });
+
+    if (!role) {
+      throw new NotFoundException('Role not found');
+    }
+
+    return role;
+  }
+
+  async createRole(dto: CreateRoleDto) {
+    const existing = await this.prisma.role.findUnique({
+      where: {
+        name: dto.name,
+      },
+    });
+
+    if (existing) {
+      throw new ConflictException('Role already exists');
+    }
+
+    return this.prisma.role.create({
+      data: {
+        name: dto.name,
+        description: dto.description,
+      },
+    });
+  }
+
+  async updateRole(id: string, dto: UpdateRoleDto) {
+    await this.findRoleById(id);
+
+    if (dto.name) {
+      const existing = await this.prisma.role.findFirst({
+        where: {
+          name: dto.name,
+          NOT: {
+            id,
+          },
+        },
+      });
+
+      if (existing) {
+        throw new ConflictException('Role already exists');
+      }
+    }
+
+    return this.prisma.role.update({
+      where: { id },
+      data: {
+        ...(dto.name !== undefined ? { name: dto.name } : {}),
+        ...(dto.description !== undefined
+          ? { description: dto.description }
+          : {}),
+      },
+    });
+  }
+
+  async deleteRole(id: string) {
+    await this.findRoleById(id);
+
+    await this.prisma.rolePermission.deleteMany({
+      where: {
+        roleId: id,
+      },
+    });
+
+    await this.prisma.userRole.deleteMany({
+      where: {
+        roleId: id,
+      },
+    });
+
+    return this.prisma.role.delete({
+      where: { id },
+    });
+  }
+
+  async userHasPermission(
+    userId: string,
+    permission: Permission,
+  ): Promise<boolean> {
+    const assignment =
+      await this.prisma.userRole.findFirst({
+        where: {
+          userId,
+          role: {
+            permissions: {
+              some: {
+                permission: {
+                  key: permission,
+                },
+              },
+            },
+          },
+        },
+      });
+
+    return assignment !== null;
+  }
+}

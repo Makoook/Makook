@@ -1,3 +1,5 @@
+import { Throttle } from '@nestjs/throttler';
+
 import {
   Body,
   Controller,
@@ -19,6 +21,7 @@ export class OtpController {
     private readonly authService: AuthService,
   ) {}
 
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
   @Post('request')
   @HttpCode(HttpStatus.ACCEPTED)
   async requestOtp(
@@ -37,6 +40,7 @@ export class OtpController {
     };
   }
 
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
   @Post('verify')
   async verifyOtp(
     @Body() dto: VerifyOtpDto,

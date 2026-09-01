@@ -1,4 +1,5 @@
-import {
+import { Throttle } from '@nestjs/throttler';
+﻿import {
   Body,
   Controller,
   HttpCode,
@@ -8,6 +9,7 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import { AuthService } from './auth.service.js';
+import { LogoutJwtAuthGuard } from './guards/logout-jwt-auth.guard.js';
 import { RefreshTokenDto } from './dto/refresh-token.dto.js';
 import {
   AuthenticatedPrincipal,
@@ -24,6 +26,7 @@ export class AuthController {
     private readonly authService: AuthService,
   ) {}
 
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
   @Post('refresh')
   async refresh(
     @Body() dto: RefreshTokenDto,
@@ -44,11 +47,11 @@ export class AuthController {
    *
    * The session to revoke comes from the verified JWT
    * (`request.user.sessionId`), never from the request
-   * body — that way there is no id to check ownership of,
+   * body â€” that way there is no id to check ownership of,
    * and this endpoint cannot be used to revoke someone
    * else's session.
    */
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(LogoutJwtAuthGuard)
   @Post('logout')
   @HttpCode(HttpStatus.NO_CONTENT)
   async logout(
@@ -59,3 +62,7 @@ export class AuthController {
     );
   }
 }
+
+
+
+
