@@ -344,25 +344,138 @@ describe('OtpService', () => {
     );
   });
 
-  it('leaves only one active OTP after concurrent requests', async () => {
-    await Promise.all(
+  it('allows only one concurrent OTP request during the cooldown', async () => {
+    const concurrentEmail =
+      `otp-concurrent-${Date.now()}@makook.local`;
+
+    const results = await Promise.allSettled(
       Array.from({ length: 10 }, () =>
         otpService.requestOtp(
           VerificationCodeType.EMAIL,
-          `  ${userEmail.toUpperCase()}  `,
+          concurrentEmail,
         ),
       ),
     );
 
-    const activeCodes = await prisma.verificationCode.count({
+    expect(
+      results.filter(
+        (result) => result.status === 'fulfilled',
+      ),
+    ).toHaveLength(1);
+
+    expect(
+      results.filter(
+        (result) => result.status === 'rejected',
+      ),
+    ).toHaveLength(9);
+
+    const user =
+      await prisma.user.findUnique({
+        where: {
+          email: concurrentEmail,
+        },
+      });
+
+    expect(user).not.toBeNull();
+
+    const activeCodes =
+      await prisma.verificationCode.count({
+        where: {
+          userId: user!.id,
+          type: VerificationCodeType.EMAIL,
+          usedAt: null,
+        },
+      });
+
+    expect(activeCodes).toBe(1);
+
+    const identifierHash =
+      createHash('sha256')
+        .update(concurrentEmail)
+        .digest('hex');
+
+    await prisma.otpRequestLimit.deleteMany({
       where: {
-        userId,
+        identifierHash,
         type: VerificationCodeType.EMAIL,
-        usedAt: null,
       },
     });
 
-    expect(activeCodes).toBe(1);
+    await prisma.verificationCode.deleteMany({
+      where: {
+        userId: user!.id,
+      },
+    });
+
+    await prisma.user.delete({
+      where: {
+        id: user!.id,
+      },
+    });
+  });
+
+  it('rejects repeated OTP requests during the cooldown window', async () => {
+    const limitedEmail =
+      `otp-limit-${Date.now()}@makook.local`;
+
+    await otpService.requestOtp(
+      VerificationCodeType.EMAIL,
+      limitedEmail,
+    );
+
+    await expect(
+      otpService.requestOtp(
+        VerificationCodeType.EMAIL,
+        limitedEmail,
+      ),
+    ).rejects.toThrow(
+      'Please wait before requesting another verification code',
+    );
+
+    const identifierHash =
+      createHash('sha256')
+        .update(limitedEmail)
+        .digest('hex');
+
+    const limitRecord =
+      await prisma.otpRequestLimit.findUnique({
+        where: {
+          identifierHash_type: {
+            identifierHash,
+            type: VerificationCodeType.EMAIL,
+          },
+        },
+      });
+
+    expect(limitRecord).not.toBeNull();
+    expect(limitRecord?.requestCount).toBe(1);
+
+    const user =
+      await prisma.user.findUnique({
+        where: {
+          email: limitedEmail,
+        },
+      });
+
+    expect(user).not.toBeNull();
+
+    await prisma.otpRequestLimit.delete({
+      where: {
+        id: limitRecord!.id,
+      },
+    });
+
+    await prisma.verificationCode.deleteMany({
+      where: {
+        userId: user!.id,
+      },
+    });
+
+    await prisma.user.delete({
+      where: {
+        id: user!.id,
+      },
+    });
   });
 
   it('enforces the shared E.164 phone policy at the service boundary', async () => {

@@ -31,6 +31,14 @@ export class OtpService {
 
   private readonly maximumAttempts = 5;
 
+  private readonly otpRequestCooldownMs =
+    60 * 1000;
+
+  private readonly otpRequestWindowMs =
+    15 * 60 * 1000;
+
+  private readonly maximumOtpRequestsPerWindow = 5;
+
   private readonly invalidCodeMessage =
     'Invalid or expired verification code';
 
@@ -65,6 +73,127 @@ export class OtpService {
       leftBuffer.length === rightBuffer.length &&
       timingSafeEqual(leftBuffer, rightBuffer)
     );
+  }
+
+  private hashIdentifier(
+    identifier: string,
+  ): string {
+    return createHash('sha256')
+      .update(identifier)
+      .digest('hex');
+  }
+
+  private async lockOtpRequestLimit(
+    tx: Prisma.TransactionClient,
+    identifierHash: string,
+    type: VerificationCodeType,
+  ): Promise<void> {
+    await tx.$executeRaw`
+      SELECT pg_advisory_xact_lock(
+        hashtextextended(
+          ${`otp-rate-limit:${type}:${identifierHash}`},
+          0
+        )
+      )
+    `;
+  }
+
+  private async enforceOtpRequestRateLimit(
+    identifier: string,
+    type: VerificationCodeType,
+  ): Promise<void> {
+    const identifierHash =
+      this.hashIdentifier(identifier);
+
+    const now = new Date();
+
+    await this.prisma.$transaction(async (tx) => {
+      await this.lockOtpRequestLimit(
+        tx,
+        identifierHash,
+        type,
+      );
+
+      const existing =
+        await tx.otpRequestLimit.findUnique({
+          where: {
+            identifierHash_type: {
+              identifierHash,
+              type,
+            },
+          },
+        });
+
+      if (!existing) {
+        await tx.otpRequestLimit.create({
+          data: {
+            identifierHash,
+            type,
+            windowStartedAt: now,
+            requestCount: 1,
+            lastRequestedAt: now,
+          },
+        });
+
+        return;
+      }
+
+      const cooldownElapsed =
+        now.getTime() -
+        existing.lastRequestedAt.getTime();
+
+      if (
+        cooldownElapsed <
+        this.otpRequestCooldownMs
+      ) {
+        throw new BadRequestException(
+          'Please wait before requesting another verification code',
+        );
+      }
+
+      const windowElapsed =
+        now.getTime() -
+        existing.windowStartedAt.getTime();
+
+      if (
+        windowElapsed >=
+        this.otpRequestWindowMs
+      ) {
+        await tx.otpRequestLimit.update({
+          where: {
+            id: existing.id,
+          },
+          data: {
+            windowStartedAt: now,
+            requestCount: 1,
+            lastRequestedAt: now,
+          },
+        });
+
+        return;
+      }
+
+      if (
+        existing.requestCount >=
+        this.maximumOtpRequestsPerWindow
+      ) {
+        throw new BadRequestException(
+          'Too many verification code requests',
+        );
+      }
+
+      await tx.otpRequestLimit.update({
+        where: {
+          id: existing.id,
+        },
+        data: {
+          requestCount: {
+            increment: 1,
+          },
+          lastRequestedAt: now,
+        },
+      });
+    });
   }
 
   private async lockOtp(
@@ -115,6 +244,12 @@ export class OtpService {
       type,
       identifier,
     );
+
+    await this.enforceOtpRequestRateLimit(
+      normalizedIdentifier,
+      type,
+    );
+
     const user = await this.findOrCreateUser(
       type,
       normalizedIdentifier,

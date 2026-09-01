@@ -121,6 +121,21 @@ model Device {
   @@index([userId])
 }
 
+model OtpRequestLimit {
+  id              String               @id @default(uuid())
+  identifierHash  String
+  type            VerificationCodeType
+  windowStartedAt DateTime
+  requestCount    Int                  @default(0)
+  lastRequestedAt DateTime
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+
+  @@unique([identifierHash, type])
+  @@index([windowStartedAt])
+  @@index([lastRequestedAt])
+}
+
 model VerificationCode {
   id        String               @id @default(uuid())
   userId    String
