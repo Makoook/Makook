@@ -7,6 +7,15 @@ export const PERMISSIONS = {
   AUTHORIZATION_ROLE_READ: 'authorization:role:read',
   AUTHORIZATION_ROLE_CREATE: 'authorization:role:create',
   AUTHORIZATION_ROLE_UPDATE: 'authorization:role:update',
+  MISSION_READ_AVAILABLE: 'mission:read:available',
+  MISSION_ACCEPT: 'mission:accept',
+  MISSION_START: 'mission:start',
+  MISSION_COMPLETE: 'mission:complete',
+  MISSION_READ_ANY: 'mission:read:any',
+  MISSION_REASSIGN: 'mission:reassign',
+  PAYMENT_READ_ANY: 'payment:read:any',
+  PAYMENT_MANAGE_ANY: 'payment:manage:any',
+
   AUTHORIZATION_ROLE_DELETE: 'authorization:role:delete',
 
   AUTHORIZATION_PERMISSION_READ: 'authorization:permission:read',

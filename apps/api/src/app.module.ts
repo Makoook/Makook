@@ -9,9 +9,11 @@ import { HealthModule } from './health/health.module.js';
 import { PrismaModule } from './prisma/prisma.module.js';
 import { IdentityModule } from './identity/identity.module.js';
 import { AuthModule } from './auth/auth.module.js';
+import { MissionModule } from './mission/mission.module.js';
+import { PaymentModule } from './payment/payment.module.js';
 
 @Module({
-  imports: [
+  imports: [PaymentModule, 
     ConfigModule.forRoot({
       isGlobal: true,
       envFilePath: '../../.env',
@@ -87,6 +89,7 @@ import { AuthModule } from './auth/auth.module.js';
   HealthModule,
   IdentityModule,
   AuthModule,
+  MissionModule,
 ],
   controllers: [AppController],
   providers: [
